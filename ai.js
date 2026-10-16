@@ -159,7 +159,7 @@ async function generateDecision(options) {
         body = JSON.parse(responseText);
       } catch {
         const contentType = response.headers.get('content-type') || 'unknown';
-        const preview = responseText.replace(/\\s+/g, ' ').trim().slice(0, 180);
+        const preview = responseText.replace(/\s+/g, ' ').trim().slice(0, 180);
         throw new Error(
           'Gemini returned a non-JSON response (HTTP ' + response.status +
           ', content-type: ' + contentType +
