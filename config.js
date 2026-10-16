@@ -3,21 +3,26 @@
 require('dotenv').config();
 
 function parsePositiveInteger(value, fallback, maximum) {
-  const parsed = Number.parseInt(value, 10);
+  if (value == null || String(value).trim() === '') return fallback;
+  const raw = String(value).trim();
+  if (!/^\d+$/.test(raw)) return fallback;
+  const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) return fallback;
   return maximum ? Math.min(parsed, maximum) : parsed;
 }
 
 function parseFraction(value, fallback) {
+  if (value == null || String(value).trim() === '') return fallback;
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0 || parsed > 0.25) return fallback;
   return parsed;
 }
 
 function parseBoolean(value, fallback) {
-  if (value == null || value.trim() === '') return fallback;
-  if (/^(true|1|yes|on)$/i.test(value.trim())) return true;
-  if (/^(false|0|no|off)$/i.test(value.trim())) return false;
+  if (value == null || String(value).trim() === '') return fallback;
+  const normalized = String(value).trim();
+  if (/^(true|1|yes|on)$/i.test(normalized)) return true;
+  if (/^(false|0|no|off)$/i.test(normalized)) return false;
   return fallback;
 }
 
@@ -27,7 +32,7 @@ const config = {
     guildId: process.env.GUILD_ID || '',
   },
   gemini: {
-    model: process.env.GEMINI_MODEL || 'gemini-3.6-flash',
+    model: String(process.env.GEMINI_MODEL || '').trim() || 'gemini-3.6-flash',
   },
   conversation: {
     autoChatEnabled: parseBoolean(process.env.GREE_AUTO_CHAT_ENABLED, true),
@@ -46,6 +51,16 @@ const config = {
       process.env.GREE_CONTEXT_MESSAGES,
       15,
       30,
+    ),
+    maxConcurrentAIRequests: parsePositiveInteger(
+      process.env.GREE_MAX_CONCURRENT_AI_REQUESTS,
+      3,
+      5,
+    ),
+    maxPendingAIRequests: parsePositiveInteger(
+      process.env.GREE_MAX_PENDING_AI_REQUESTS,
+      30,
+      100,
     ),
     channelIds: (process.env.GREE_CHANNEL_IDS || '')
       .split(',')

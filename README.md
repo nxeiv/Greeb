@@ -36,9 +36,11 @@ Gree has no user-facing slash or prefix commands. On startup, the bot attempts t
 - GREE_UNSOLICITED_COOLDOWN_MS=60000 sets the minimum gap between unsolicited replies per channel.
 - GREE_MAX_UNSOLICITED_PER_10_MINUTES=3 limits unsolicited replies per channel over a rolling ten-minute window.
 - GREE_CONTEXT_MESSAGES=15 controls how many recent messages are provided as temporary context.
+- GREE_MAX_CONCURRENT_AI_REQUESTS=3 caps parallel Gemini requests (values are bounded to 1–5).
+- GREE_MAX_PENDING_AI_REQUESTS=30 limits the global waiting queue (values are bounded to 1–100).
 - GREE_CHANNEL_IDS can contain a comma-separated list of channel IDs. Leave it empty to allow all eligible server text channels the bot can access.
 
-The local chance and cooldown controls run before Gemini is called, reducing needless API requests. Direct replies also have channel-level rate limits.
+The local chance and cooldown controls run before Gemini is called, reducing needless API requests. Direct replies also have channel-level rate limits. Gree keeps at most 30 messages per channel, forgets inactive channel state after 30 minutes, tracks at most 500 channel histories, limits each channel to three queued reply candidates, and bounds the global AI queue.
 
 ## Privacy boundary
 

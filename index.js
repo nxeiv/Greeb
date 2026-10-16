@@ -28,12 +28,101 @@ const client = new Client({
 const channelHistory = new Map();
 const channelQueues = new Map();
 const channelActivity = new Map();
+const channelPendingCounts = new Map();
+const aiRequestQueue = [];
 const MAX_STORED_MESSAGES = 30;
+const MAX_TRACKED_CHANNELS = 500;
+const CHANNEL_STATE_TTL_MS = 30 * 60 * 1000;
+const MAX_PENDING_PER_CHANNEL = 3;
 const TEN_MINUTES_MS = 10 * 60 * 1000;
+let activeAIRequests = 0;
 
 function log(message) {
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
   console.log('[' + timestamp + '] [Gree] ' + message);
+}
+
+function evictChannelState(channelId) {
+  channelHistory.delete(channelId);
+  channelActivity.delete(channelId);
+}
+
+function pruneChannelState(now = Date.now()) {
+  for (const [channelId, history] of channelHistory) {
+    const lastEntry = history[history.length - 1];
+    const lastActivityAt = lastEntry && Number.isFinite(lastEntry.createdAt)
+      ? lastEntry.createdAt
+      : 0;
+
+    if (
+      !channelQueues.has(channelId) &&
+      now - lastActivityAt > CHANNEL_STATE_TTL_MS
+    ) {
+      evictChannelState(channelId);
+    }
+  }
+}
+
+function ensureChannelTracked(channelId) {
+  if (channelHistory.has(channelId)) return true;
+
+  const now = Date.now();
+  pruneChannelState(now);
+
+  if (channelHistory.size < MAX_TRACKED_CHANNELS) return true;
+
+  let oldestChannelId = null;
+  let oldestActivityAt = Infinity;
+
+  for (const [candidateId, history] of channelHistory) {
+    if (candidateId === channelId || channelQueues.has(candidateId)) continue;
+    const lastEntry = history[history.length - 1];
+    const activityAt = lastEntry && Number.isFinite(lastEntry.createdAt)
+      ? lastEntry.createdAt
+      : 0;
+
+    if (activityAt < oldestActivityAt) {
+      oldestActivityAt = activityAt;
+      oldestChannelId = candidateId;
+    }
+  }
+
+  if (oldestChannelId === null) return false;
+  evictChannelState(oldestChannelId);
+  return true;
+}
+
+function drainAIRequestQueue() {
+  while (
+    activeAIRequests < config.conversation.maxConcurrentAIRequests &&
+    aiRequestQueue.length > 0
+  ) {
+    const item = aiRequestQueue.shift();
+    activeAIRequests++;
+
+    Promise.resolve()
+      .then(item.task)
+      .then(item.resolve, item.reject)
+      .finally(() => {
+        activeAIRequests--;
+        drainAIRequestQueue();
+      });
+  }
+}
+
+function runWithAIConcurrency(task) {
+  return new Promise((resolve, reject) => {
+    if (
+      activeAIRequests >= config.conversation.maxConcurrentAIRequests &&
+      aiRequestQueue.length >= config.conversation.maxPendingAIRequests
+    ) {
+      reject(new Error('AI request queue is full; this reply was skipped to prevent a backlog.'));
+      return;
+    }
+
+    aiRequestQueue.push({ task, resolve, reject });
+    drainAIRequestQueue();
+  });
 }
 
 function cleanIncomingContent(content, botUserId) {
@@ -65,6 +154,8 @@ function getHistory(channelId) {
 }
 
 function addToHistory(channelId, entry) {
+  if (!ensureChannelTracked(channelId)) return false;
+
   const history = getHistory(channelId);
   history.push(entry);
 
@@ -73,6 +164,7 @@ function addToHistory(channelId, entry) {
   }
 
   channelHistory.set(channelId, history);
+  return true;
 }
 
 function formatHistory(channelId) {
@@ -170,11 +262,11 @@ async function processCandidate(message, direct, latestMessage) {
   let decision;
 
   try {
-    decision = await generateDecision({
+    decision = await runWithAIConcurrency(() => generateDecision({
       direct,
       context,
       latestMessage,
-    });
+    }));
   } catch (error) {
     log('Gemini request failed: ' + error.message);
     return;
@@ -260,12 +352,12 @@ async function handleMessage(message) {
     }
   }
 
-  addToHistory(message.channel.id, {
+  if (!addToHistory(message.channel.id, {
     authorId: message.author.id,
     content: text,
     isGree: false,
     createdAt: Date.now(),
-  });
+  })) return;
 
   // Stay silent and do not send high-risk source messages to Gemini.
   if (containsHighRiskTopic(text)) return;
@@ -279,20 +371,28 @@ async function handleMessage(message) {
 
   if (!direct && !chanceEligible) return;
 
-  const previous = channelQueues.get(message.channel.id) || Promise.resolve();
+  const channelId = message.channel.id;
+  const pendingCount = channelPendingCounts.get(channelId) || 0;
+  if (pendingCount >= MAX_PENDING_PER_CHANNEL) return;
+
+  channelPendingCounts.set(channelId, pendingCount + 1);
+  const previous = channelQueues.get(channelId) || Promise.resolve();
   const task = previous.then(
     () => processCandidate(message, direct, text),
     () => processCandidate(message, direct, text),
   ).catch(error => {
     log('Message handler failed: ' + (error && error.message ? error.message : String(error)));
-  });
+  }).finally(() => {
+    const remaining = (channelPendingCounts.get(channelId) || 1) - 1;
+    if (remaining > 0) channelPendingCounts.set(channelId, remaining);
+    else channelPendingCounts.delete(channelId);
 
-  channelQueues.set(message.channel.id, task);
-  void task.then(() => {
-    if (channelQueues.get(message.channel.id) === task) {
-      channelQueues.delete(message.channel.id);
+    if (channelQueues.get(channelId) === task) {
+      channelQueues.delete(channelId);
     }
   });
+
+  channelQueues.set(channelId, task);
 }
 
 client.on(Events.MessageCreate, message => {
@@ -307,6 +407,19 @@ client.once(Events.ClientReady, async readyClient => {
   log('Gemini model: ' + config.gemini.model + '; configured API keys: ' + getConfiguredKeyCount() + '.');
   void checkGeminiConnection().then(result => {
     log((result.ok ? 'Gemini preflight passed: ' : 'Gemini preflight warning: ') + result.message);
+
+    if (!result.ok) {
+      readyClient.user.setPresence({
+        activities: [{ name: 'AI temporarily unavailable', type: ActivityType.Watching }],
+        status: 'idle',
+      });
+    }
+  }).catch(error => {
+    log('Gemini preflight failed unexpectedly: ' + (error && error.message ? error.message : String(error)));
+    readyClient.user.setPresence({
+      activities: [{ name: 'AI connection issue', type: ActivityType.Watching }],
+      status: 'idle',
+    });
   });
   log(config.conversation.autoChatEnabled
     ? 'Selective unsolicited participation is enabled.'
