@@ -10,7 +10,7 @@ const {
 } = require('discord.js');
 
 const config = require('./config');
-const { generateDecision, getConfiguredKeyCount } = require('./ai');
+const { checkGeminiConnection, generateDecision, getConfiguredKeyCount } = require('./ai');
 const {
   containsHighRiskTopic,
   shouldConsiderSpontaneous,
@@ -305,6 +305,9 @@ client.once(Events.ClientReady, async readyClient => {
   log('Logged in as ' + readyClient.user.tag + '.');
   log('Conversation-only mode enabled; no slash or prefix commands are registered.');
   log('Gemini model: ' + config.gemini.model + '; configured API keys: ' + getConfiguredKeyCount() + '.');
+  void checkGeminiConnection().then(result => {
+    log((result.ok ? 'Gemini preflight passed: ' : 'Gemini preflight warning: ') + result.message);
+  });
   log(config.conversation.autoChatEnabled
     ? 'Selective unsolicited participation is enabled.'
     : 'Unsolicited participation is disabled; Gree replies only when directly addressed.');
