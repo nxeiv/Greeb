@@ -7,6 +7,7 @@ const {
   checkGeminiConnection,
   generateDecision,
   getHtml403CooldownRemainingMs,
+  isGeminiCooldownError,
   isHtmlForbiddenResponse,
   summarizeGeminiFailure,
 } = require('../ai');
@@ -97,4 +98,13 @@ test('preflight succeeds if the Models probe and generateContent succeed', async
   assert.equal(generationCalls, 1);
   assert.match(result.message, /generateContent succeeded/);
   assert.doesNotMatch(result.message, /secret-test-key/);
+});
+
+
+test('identifies cooldown errors without exposing their underlying API response', () => {
+  assert.equal(
+    isGeminiCooldownError(new Error('Gemini requests are paused for about 240s after a generic HTML 403, to avoid repeating a blocked request.')),
+    true,
+  );
+  assert.equal(isGeminiCooldownError(new Error('HTTP 503: service unavailable')), false);
 });

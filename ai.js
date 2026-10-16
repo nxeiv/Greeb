@@ -187,6 +187,11 @@ function getHtml403CooldownRemainingMs(now = Date.now()) {
   return Math.max(0, html403CooldownUntil - now);
 }
 
+function isGeminiCooldownError(error) {
+  return /Gemini requests are paused for about \d+s after a generic HTML 403/i
+    .test(getErrorText(error) || String(error));
+}
+
 function summarizeGeminiFailure(error) {
   const raw = getErrorText(error) || String(error);
   const status = getErrorStatus(error);
@@ -360,5 +365,6 @@ module.exports = {
   getConfiguredKeyCount,
   isHtmlForbiddenResponse,
   getHtml403CooldownRemainingMs,
+  isGeminiCooldownError,
   summarizeGeminiFailure,
 };

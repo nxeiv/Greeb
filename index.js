@@ -10,7 +10,12 @@ const {
 } = require('discord.js');
 
 const config = require('./config');
-const { checkGeminiConnection, generateDecision, getConfiguredKeyCount } = require('./ai');
+const {
+  checkGeminiConnection,
+  generateDecision,
+  getConfiguredKeyCount,
+  isGeminiCooldownError,
+} = require('./ai');
 const { createChannelStateStore, createTaskLimiter, createPerKeyTaskScheduler } = require('./runtime');
 const {
   containsHighRiskTopic,
@@ -43,10 +48,60 @@ const aiLimiter = createTaskLimiter({
   maxConcurrent: config.conversation.maxConcurrentAIRequests,
   maxPending: config.conversation.maxPendingAIRequests,
 });
+const recentGeminiFailureLogs = new Map();
+let aiHealth = null;
 
 function log(message) {
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
   console.log('[' + timestamp + '] [Gree] ' + message);
+}
+
+function setAiHealth(healthy) {
+  if (!client.user || aiHealth === healthy) return;
+  const previous = aiHealth;
+  aiHealth = healthy;
+
+  const activity = healthy
+    ? { name: 'hanging out', type: ActivityType.Watching }
+    : { name: 'AI temporarily unavailable', type: ActivityType.Watching };
+
+  Promise.resolve(client.user.setPresence({
+    activities: [activity],
+    status: healthy ? 'online' : 'idle',
+  })).catch(error => {
+    log('Unable to update bot presence: ' + String(error && error.message ? error.message : error).slice(0, 180));
+  });
+
+  if (previous === false && healthy) {
+    log('Gemini connectivity recovered; normal presence restored.');
+  }
+}
+
+function logGeminiFailure(error) {
+  const raw = String(error && error.message ? error.message : error || 'Unknown Gemini error');
+  const safeMessage = raw
+    .replace(/AIza[0-9A-Za-z_-]{30,}/g, '[redacted API key]')
+    .replace(/\s+/g, ' ')
+    .slice(0, 420);
+  const signature = safeMessage.replace(/key slot \d+/gi, 'key slot [n]');
+  const now = Date.now();
+  const previous = recentGeminiFailureLogs.get(signature) || 0;
+
+  if (now - previous < 60000) return;
+  if (recentGeminiFailureLogs.size >= 100) {
+    let oldestKey = null;
+    let oldestTime = Infinity;
+    for (const [key, time] of recentGeminiFailureLogs) {
+      if (time < oldestTime) {
+        oldestKey = key;
+        oldestTime = time;
+      }
+    }
+    if (oldestKey !== null) recentGeminiFailureLogs.delete(oldestKey);
+  }
+
+  recentGeminiFailureLogs.set(signature, now);
+  log('Gemini request failed: ' + safeMessage);
 }
 
 function cleanIncomingContent(content, botUserId) {
@@ -182,11 +237,16 @@ async function processCandidate(message, direct, latestMessage) {
       latestMessage,
     }), { priority: direct ? 'high' : 'normal' });
   } catch (error) {
-    if (error && /reprioritized for a direct mention/.test(error.message || '')) return;
-    log('Gemini request failed: ' + error.message);
+    const message = String(error && error.message ? error.message : error);
+    if (/reprioritized for a direct mention/.test(message)) return;
+    if (isGeminiCooldownError(error)) return;
+    if (/AI request queue is full/.test(message)) return;
+    setAiHealth(false);
+    logGeminiFailure(error);
     return;
   }
 
+  setAiHealth(true);
   if (!decision || decision.shouldRespond !== true) return;
 
   const reply = validateReply(decision.message);
@@ -307,32 +367,21 @@ client.once(Events.ClientReady, async readyClient => {
   log('Logged in as ' + readyClient.user.tag + '.');
   log('Conversation-only mode enabled; no slash or prefix commands are registered.');
   log('Gemini model: ' + config.gemini.model + '; configured API keys: ' + getConfiguredKeyCount() + '.');
-  void checkGeminiConnection().then(result => {
-    log((result.ok ? 'Gemini preflight passed: ' : 'Gemini preflight warning: ') + result.message);
-
-    if (!result.ok) {
-      readyClient.user.setPresence({
-        activities: [{ name: 'AI temporarily unavailable', type: ActivityType.Watching }],
-        status: 'idle',
-      });
-    }
-  }).catch(error => {
-    log('Gemini preflight failed unexpectedly: ' + (error && error.message ? error.message : String(error)));
-    readyClient.user.setPresence({
-      activities: [{ name: 'AI connection issue', type: ActivityType.Watching }],
-      status: 'idle',
-    });
-  });
   log(config.conversation.autoChatEnabled
     ? 'Selective unsolicited participation is enabled.'
     : 'Unsolicited participation is disabled; Gree replies only when directly addressed.');
 
   readyClient.user.setPresence({
-    activities: [{
-      name: 'hanging out',
-      type: ActivityType.Watching,
-    }],
-    status: 'online',
+    activities: [{ name: 'checking AI connection', type: ActivityType.Watching }],
+    status: 'idle',
+  });
+
+  void checkGeminiConnection().then(result => {
+    log((result.ok ? 'Gemini preflight passed: ' : 'Gemini preflight warning: ') + result.message);
+    setAiHealth(result.ok);
+  }).catch(error => {
+    setAiHealth(false);
+    logGeminiFailure(error);
   });
 
   await clearLegacyCommands();
