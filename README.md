@@ -27,7 +27,7 @@ Do not commit .env, bot tokens, or API keys.
 
 ## No commands
 
-Gree has no user-facing slash or prefix commands. On startup, the bot attempts to delete old global slash commands left by the previous application. To remove old guild-scoped commands too, set GUILD_ID to the old server's ID while starting the bot. The cleanup is best-effort and logs an error if Discord rejects it.
+Gree has no user-facing slash or prefix commands. On startup, the bot attempts to delete old global slash commands left by the previous application. To remove old guild-scoped commands for this same Discord application too, set GUILD_ID to the server's ID while starting the bot. This does not remove commands belonging to another Discord application, such as the Main Bot. The cleanup is best-effort and logs an error if Discord rejects it.
 
 ## Conversation controls
 
