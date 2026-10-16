@@ -9,7 +9,7 @@
     "check": "node --check index.js && node --check ai.js && node --check config.js && node --check policy.js",
     "test": "node --test"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "engines": {
     "node": ">=20"
   },
