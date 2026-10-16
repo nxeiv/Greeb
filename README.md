@@ -54,6 +54,10 @@ Gree is explicitly instructed not to make dark, offensive, controversial, or tar
 
 These are defensive checks, not a mathematical guarantee that an AI can never produce an inappropriate reply. Test the bot in a private server before enabling it in a busy community, and keep the ability to turn off unsolicited participation with GREE_AUTO_CHAT_ENABLED=false.
 
+## Updating a deployed copy
+
+Changes pushed to this repository do not automatically replace files on a separately provisioned hosting server unless that server is configured to pull from GitHub. When deploying by file upload, copy the updated source files from `main` and make sure `runtime.js` is uploaded alongside `index.js`. Keep the server's existing environment variables and secrets; do not overwrite them with `.env.example`. Restart after the files are synced and check the startup logs for the configured request limits and the Gemini preflight result.
+
 ## Gemini connection troubleshooting
 
 A regular Gemini API error is usually returned as JSON. If the startup log says the endpoint returned a generic HTML `403 Forbidden` page, Gree records that distinction, stops retrying backup keys for that response, and pauses further generation requests for five minutes. This prevents repeated failed calls and log spam; it does not bypass the denial.
