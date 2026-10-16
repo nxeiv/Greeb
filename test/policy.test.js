@@ -11,6 +11,7 @@ const {
 
 test('high-risk topics are identified before a message is sent to Gemini', () => {
   assert.equal(containsHighRiskTopic('this server drama is getting weird'), true);
+  assert.equal(containsHighRiskTopic('tell me a dark joke please'), true);
   assert.equal(containsHighRiskTopic('who wants to build something green'), false);
 });
 
@@ -44,10 +45,11 @@ test('reply validation accepts harmless conversational text', () => {
   assert.equal(validateReply('  yesyes that is so random  '), 'yesyes that is so random');
 });
 
-test('reply validation rejects dangerous mentions, links, excessive length, and risky topics', () => {
+test('reply validation rejects pings, links, controversy, targeted insults, and excessive length', () => {
   assert.equal(validateReply('@everyone look at this'), null);
   assert.equal(validateReply('check https://example.com'), null);
   assert.equal(validateReply('this might turn into server drama'), null);
+  assert.equal(validateReply('you are such an idiot'), null);
   assert.equal(validateReply('x'.repeat(1801)), null);
   assert.equal(validateReply('  '), null);
 });
