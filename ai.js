@@ -153,11 +153,19 @@ async function generateDecision(options) {
         },
       );
 
+      const responseText = await response.text();
       let body;
       try {
-        body = await response.json();
+        body = JSON.parse(responseText);
       } catch {
-        throw new Error('Gemini returned an unreadable API response.');
+        const contentType = response.headers.get('content-type') || 'unknown';
+        const preview = responseText.replace(/\\s+/g, ' ').trim().slice(0, 180);
+        throw new Error(
+          'Gemini returned a non-JSON response (HTTP ' + response.status +
+          ', content-type: ' + contentType +
+          (preview ? ', body starts with: ' + preview : ', empty body') +
+          '). Check the hosting network/proxy response and Gemini endpoint.',
+        );
       }
 
       if (response.ok) {
