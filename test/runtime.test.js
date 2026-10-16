@@ -175,3 +175,63 @@ test('direct mentions are prioritized over queued unsolicited requests', async (
   assert.deepEqual(executionOrder, ['first', 'direct', 'unsolicited-one']);
 });
 
+
+
+test('per-channel scheduler prioritizes direct mentions and preserves serial execution', async () => {
+  const { createPerKeyTaskScheduler } = require('../runtime');
+  const scheduler = createPerKeyTaskScheduler({ maxPendingPerKey: 3 });
+  const events = [];
+  let releaseFirst;
+
+  const first = scheduler.enqueue('channel', () => new Promise(resolve => {
+    events.push('running');
+    releaseFirst = value => {
+      events.push('first');
+      resolve(value);
+    };
+  }));
+
+  await new Promise(resolve => setImmediate(resolve));
+
+  const normalOne = scheduler.enqueue('channel', async () => {
+    events.push('normal-one');
+    return 'normal-one';
+  });
+  const normalTwo = scheduler.enqueue('channel', async () => {
+    events.push('normal-two');
+    return 'normal-two';
+  });
+
+  const direct = scheduler.enqueue('channel', async () => {
+    events.push('direct');
+    return 'direct';
+  }, { priority: 'high' });
+
+  // The direct request replaces the newest queued normal request at capacity.
+  await assert.rejects(normalTwo, /reprioritized for a direct mention/);
+  releaseFirst('first');
+
+  assert.equal(await first, 'first');
+  assert.equal(await direct, 'direct');
+  assert.equal(await normalOne, 'normal-one');
+  assert.deepEqual(events, ['running', 'first', 'direct', 'normal-one']);
+  assert.equal(scheduler.has('channel'), false);
+});
+
+test('per-channel scheduler quietly drops normal traffic at its limit', async () => {
+  const { createPerKeyTaskScheduler } = require('../runtime');
+  const scheduler = createPerKeyTaskScheduler({ maxPendingPerKey: 1 });
+  let release;
+  const first = scheduler.enqueue('channel', () => new Promise(resolve => {
+    release = resolve;
+  }));
+
+  await new Promise(resolve => setImmediate(resolve));
+
+  const dropped = await scheduler.enqueue('channel', async () => 'should not run');
+  assert.equal(dropped, undefined);
+
+  release('first');
+  assert.equal(await first, 'first');
+  assert.equal(scheduler.getStats('channel').running, false);
+});

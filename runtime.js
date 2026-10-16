@@ -165,6 +165,102 @@ function createTaskLimiter(options = {}) {
   return { getStats, run };
 }
 
+
+function createPerKeyTaskScheduler(options = {}) {
+  const maxPendingPerKey = positiveInteger(options.maxPendingPerKey, 3);
+  const states = new Map();
+
+  function runNext(key, state) {
+    if (state.running || state.queue.length === 0) {
+      if (!state.running && state.queue.length === 0) states.delete(key);
+      return;
+    }
+
+    const item = state.queue.shift();
+    state.running = true;
+
+    Promise.resolve()
+      .then(item.task)
+      .then(item.resolve, item.reject)
+      .finally(() => {
+        state.running = false;
+        runNext(key, state);
+      });
+  }
+
+  function enqueue(key, task, options = {}) {
+    if (typeof key !== 'string' || key.length === 0) {
+      return Promise.reject(new TypeError('Scheduler key must be a non-empty string.'));
+    }
+    if (typeof task !== 'function') {
+      return Promise.reject(new TypeError('Scheduler expects a function.'));
+    }
+
+    const priority = options.priority === 'high' ? 1 : 0;
+    let state = states.get(key);
+
+    if (!state) {
+      state = { running: false, queue: [] };
+      states.set(key, state);
+    }
+
+    const pendingCount = state.queue.length + (state.running ? 1 : 0);
+    if (pendingCount >= maxPendingPerKey) {
+      let evictIndex = -1;
+
+      if (priority === 1) {
+        for (let index = state.queue.length - 1; index >= 0; index--) {
+          if (state.queue[index].priority === 0) {
+            evictIndex = index;
+            break;
+          }
+        }
+      }
+
+      if (evictIndex < 0) {
+        if (!state.running && state.queue.length === 0) states.delete(key);
+        return Promise.resolve(undefined);
+      }
+
+      const [evicted] = state.queue.splice(evictIndex, 1);
+      evicted.reject(new Error('Channel queue was reprioritized for a direct mention; this reply was skipped.'));
+    }
+
+    return new Promise((resolve, reject) => {
+      const item = { task, resolve, reject, priority };
+      const insertBefore = state.queue.findIndex(queued => queued.priority < priority);
+
+      if (insertBefore < 0) state.queue.push(item);
+      else state.queue.splice(insertBefore, 0, item);
+
+      runNext(key, state);
+    });
+  }
+
+  function getStats(key) {
+    if (typeof key === 'string') {
+      const state = states.get(key);
+      return state
+        ? { running: state.running, queued: state.queue.length, maxPendingPerKey }
+        : { running: false, queued: 0, maxPendingPerKey };
+    }
+
+    let running = 0;
+    let queued = 0;
+    for (const state of states.values()) {
+      if (state.running) running++;
+      queued += state.queue.length;
+    }
+    return { activeKeys: states.size, running, queued, maxPendingPerKey };
+  }
+
+  return {
+    enqueue,
+    getStats,
+    has: key => states.has(key),
+  };
+}
+
 module.exports = {
   createChannelStateStore,
   createTaskLimiter,

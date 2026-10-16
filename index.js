@@ -11,7 +11,7 @@ const {
 
 const config = require('./config');
 const { checkGeminiConnection, generateDecision, getConfiguredKeyCount } = require('./ai');
-const { createChannelStateStore, createTaskLimiter } = require('./runtime');
+const { createChannelStateStore, createTaskLimiter, createPerKeyTaskScheduler } = require('./runtime');
 const {
   containsHighRiskTopic,
   shouldConsiderSpontaneous,
@@ -26,16 +26,17 @@ const client = new Client({
   ],
 });
 
-const channelQueues = new Map();
 const channelActivity = new Map();
-const channelPendingCounts = new Map();
 const MAX_PENDING_PER_CHANNEL = 3;
 const TEN_MINUTES_MS = 10 * 60 * 1000;
+const channelScheduler = createPerKeyTaskScheduler({
+  maxPendingPerKey: MAX_PENDING_PER_CHANNEL,
+});
 const channelStore = createChannelStateStore({
   maxChannels: 500,
   maxMessages: 30,
   ttlMs: 30 * 60 * 1000,
-  isBusy: channelId => channelQueues.has(channelId),
+  isBusy: channelId => channelScheduler.has(channelId),
   onEvict: channelId => channelActivity.delete(channelId),
 });
 const aiLimiter = createTaskLimiter({
@@ -286,27 +287,14 @@ async function handleMessage(message) {
   if (!direct && !chanceEligible) return;
 
   const channelId = message.channel.id;
-  const pendingCount = channelPendingCounts.get(channelId) || 0;
-  if (pendingCount >= MAX_PENDING_PER_CHANNEL) return;
-
-  channelPendingCounts.set(channelId, pendingCount + 1);
-  const previous = channelQueues.get(channelId) || Promise.resolve();
-  const task = previous.then(
+  void channelScheduler.enqueue(
+    channelId,
     () => processCandidate(message, direct, text),
-    () => processCandidate(message, direct, text),
+    { priority: direct ? 'high' : 'normal' },
   ).catch(error => {
+    if (error && /reprioritized for a direct mention/.test(error.message || '')) return;
     log('Message handler failed: ' + (error && error.message ? error.message : String(error)));
-  }).finally(() => {
-    const remaining = (channelPendingCounts.get(channelId) || 1) - 1;
-    if (remaining > 0) channelPendingCounts.set(channelId, remaining);
-    else channelPendingCounts.delete(channelId);
-
-    if (channelQueues.get(channelId) === task) {
-      channelQueues.delete(channelId);
-    }
   });
-
-  channelQueues.set(channelId, task);
 }
 
 client.on(Events.MessageCreate, message => {
