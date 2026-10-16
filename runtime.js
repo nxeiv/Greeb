@@ -170,6 +170,16 @@ function createPerKeyTaskScheduler(options = {}) {
   const maxPendingPerKey = positiveInteger(options.maxPendingPerKey, 3);
   const states = new Map();
 
+  function finish(key, state, item, error, value) {
+    // Keep map/runner state consistent before waking the caller.
+    state.running = false;
+    if (state.queue.length > 0) runNext(key, state);
+    else states.delete(key);
+
+    if (error) item.reject(error);
+    else item.resolve(value);
+  }
+
   function runNext(key, state) {
     if (state.running || state.queue.length === 0) {
       if (!state.running && state.queue.length === 0) states.delete(key);
@@ -181,11 +191,10 @@ function createPerKeyTaskScheduler(options = {}) {
 
     Promise.resolve()
       .then(item.task)
-      .then(item.resolve, item.reject)
-      .finally(() => {
-        state.running = false;
-        runNext(key, state);
-      });
+      .then(
+        value => finish(key, state, item, null, value),
+        error => finish(key, state, item, error),
+      );
   }
 
   function enqueue(key, task, options = {}) {
