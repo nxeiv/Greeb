@@ -62,6 +62,8 @@ test('preflight stops after the first HTML 403 instead of cycling backup keys', 
   assert.equal(fetchCalls, 1);
   assert.equal(generationCalls, 1);
   assert.match(result.message, /HTML error page/);
+  assert.match(result.message, /stopped after key slot 1 of 3/);
+  assert.doesNotMatch(result.message, /failed for all 3 configured key/);
   assert.doesNotMatch(result.message, /secret-test-key/);
   assert.ok(getHtml403CooldownRemainingMs() > 0);
   await assert.rejects(
