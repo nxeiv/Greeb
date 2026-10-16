@@ -3,6 +3,15 @@
 const config = require('./config');
 const { GoogleGenAI } = require('@google/genai');
 
+const AI_REQUEST_TIMEOUT_MS = 25000;
+
+function createGeminiClient(apiKey) {
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: { timeout: AI_REQUEST_TIMEOUT_MS },
+  });
+}
+
 function loadApprovedExamples() {
   try {
     const styleLibrary = require('./style-examples.json');
@@ -95,9 +104,9 @@ function parseDecision(rawText) {
   };
 }
 
-async function probeModelsEndpoint(apiKey) {
+async function probeModelsEndpoint(apiKey, fetchImpl = globalThis.fetch) {
   try {
-    const response = await fetch(
+    const response = await fetchImpl(
       'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1',
       {
         method: 'GET',
@@ -139,16 +148,34 @@ async function probeModelsEndpoint(apiKey) {
   }
 }
 
-function summarizeGeminiFailure(error) {
-  const raw = String(error && error.message ? error.message : error);
-  const statusValue = error && (error.status || error.statusCode || error.response?.status);
-  let status = Number(statusValue);
-  if (!Number.isFinite(status) || status <= 0) {
-    const match = raw.match(/(?:HTTP\s+|Error\s+)(\d{3})/i);
-    status = match ? Number(match[1]) : null;
-  }
+function getErrorText(error) {
+  const values = [error && error.message, error && error.cause && error.cause.message];
+  return values.filter(value => typeof value === 'string' && value.length > 0).join(' | ');
+}
 
-  if (/<!doctype html|<html\b/i.test(raw)) {
+function getErrorStatus(error) {
+  const values = [error && error.status, error && error.statusCode, error && error.response && error.response.status];
+  for (const value of values) {
+    const status = Number(value);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) return status;
+  }
+  const match = getErrorText(error).match(/(?:HTTP\s+|Error\s+)(\d{3})/i);
+  return match ? Number(match[1]) : null;
+}
+
+function isHtmlForbiddenResponse(error) {
+  const raw = getErrorText(error);
+  const status = getErrorStatus(error);
+  const mentionsForbidden = status === 403 || /(?:HTTP\s+403|Error\s+403\s*\(Forbidden\)|403\s+Forbidden)/i.test(raw);
+  const looksLikeHtml = /<!doctype html|<html\b|<title>\s*Error\s+403|Your client does not have permission to get URL/i.test(raw);
+  return mentionsForbidden && looksLikeHtml;
+}
+
+function summarizeGeminiFailure(error) {
+  const raw = getErrorText(error) || String(error);
+  const status = getErrorStatus(error);
+
+  if (isHtmlForbiddenResponse(error) || /<!doctype html|<html\b/i.test(raw)) {
     return 'HTTP ' + (status || 'unknown') + ' with an HTML error page (not a normal Gemini API JSON error)';
   }
 
@@ -163,8 +190,8 @@ function summarizeGeminiFailure(error) {
   return (status ? 'HTTP ' + status + ': ' : '') + String(detail).replace(/\s+/g, ' ').slice(0, 180);
 }
 
-async function checkGeminiConnection() {
-  const keys = getApiKeys();
+async function checkGeminiConnection(options = {}) {
+  const keys = Array.isArray(options.apiKeys) ? options.apiKeys.map(key => String(key || '').trim()).filter(Boolean) : getApiKeys();
   if (!keys.length) return { ok: false, message: 'No Gemini API key is configured.' };
 
   const model = config.gemini.model.replace(/^models\//, '');
@@ -174,14 +201,16 @@ async function checkGeminiConnection() {
   // This distinguishes a rejected key/project from a generation-specific
   // HTML rejection at Google's frontend without ever logging the key.
   for (let index = 0; index < keys.length; index++) {
-    const modelsProbe = await probeModelsEndpoint(keys[index]);
+    const modelsProbe = await probeModelsEndpoint(keys[index], options.fetchImpl || globalThis.fetch);
     const modelsSummary = modelsProbe.ok
       ? 'models.list HTTP ' + modelsProbe.status
       : 'models.list ' + (modelsProbe.status ? 'HTTP ' + modelsProbe.status : 'request failed') +
         ': ' + modelsProbe.detail;
 
     try {
-      const client = new GoogleGenAI({ apiKey: keys[index] });
+      const client = typeof options.createClient === 'function'
+        ? options.createClient(keys[index])
+        : createGeminiClient(keys[index]);
       const response = await client.models.generateContent({
         model,
         contents: 'Reply with exactly OK.',
@@ -203,6 +232,11 @@ async function checkGeminiConnection() {
         'key slot ' + (index + 1) + ': ' + modelsSummary +
         '; generateContent ' + summarizeGeminiFailure(error),
       );
+
+      // A generic HTML 403 is not a normal Gemini API JSON error. Since every
+      // key uses the same host network route, rotating backup keys is unlikely
+      // to help and can needlessly multiply failed requests.
+      if (isHtmlForbiddenResponse(error)) break;
     }
   }
 
@@ -236,7 +270,7 @@ async function generateDecision(options) {
 
   for (let index = 0; index < keys.length; index++) {
     try {
-      const client = new GoogleGenAI({ apiKey: keys[index] });
+      const client = createGeminiClient(keys[index]);
       const response = await client.models.generateContent({
         model,
         contents: [{ role: 'user', parts: [{ text: requestText }] }],
@@ -261,8 +295,16 @@ async function generateDecision(options) {
       if (!rawText) throw new Error('Gemini returned an empty response.');
       return parseDecision(rawText);
     } catch (error) {
-      const detail = error && error.message ? error.message : String(error);
-      lastError = new Error('Gemini key slot ' + (index + 1) + ' failed: ' + detail.slice(0, 800));
+      lastError = new Error('Gemini key slot ' + (index + 1) + ' failed: ' + summarizeGeminiFailure(error));
+
+      if (isHtmlForbiddenResponse(error)) {
+        lastError = new Error(
+          'Gemini returned an HTML HTTP 403 instead of a normal API JSON error. ' +
+          'Backup keys were not retried because this commonly indicates a hosting-network or API frontend restriction. ' +
+          'Check the hosting provider route and Google API access settings.',
+        );
+        break;
+      }
 
       const statusValue = error && (error.status || error.statusCode || error.code);
       const status = Number(statusValue);
@@ -281,4 +323,6 @@ module.exports = {
   checkGeminiConnection,
   generateDecision,
   getConfiguredKeyCount,
+  isHtmlForbiddenResponse,
+  summarizeGeminiFailure,
 };
