@@ -76,7 +76,9 @@ function addToHistory(channelId, entry) {
 }
 
 function formatHistory(channelId) {
-  const history = getHistory(channelId).slice(-config.conversation.contextMessages);
+  const history = getHistory(channelId)
+    .slice(-config.conversation.contextMessages)
+    .filter(entry => !containsHighRiskTopic(entry.content));
   const labels = new Map();
   let nextMemberNumber = 1;
 
@@ -161,8 +163,8 @@ async function processCandidate(message, direct, latestMessage) {
   const recentHistory = getHistory(channelId)
     .slice(-config.conversation.contextMessages);
 
-  // High-risk content is not forwarded to Gemini as part of a reply attempt.
-  if (recentHistory.some(entry => containsHighRiskTopic(entry.content))) return;
+  // Do not join while a sensitive topic is still active in the latest messages.
+  if (recentHistory.slice(-5).some(entry => containsHighRiskTopic(entry.content))) return;
 
   const context = formatHistory(channelId);
   let decision;
@@ -235,8 +237,28 @@ async function handleMessage(message) {
   const text = cleanIncomingContent(message.content, client.user.id);
   if (!text) return;
 
-  const direct = message.mentions.users.has(client.user.id) ||
+  let direct = message.mentions.users.has(client.user.id) ||
     Boolean(message.mentions.repliedUser && message.mentions.repliedUser.id === client.user.id);
+
+  // Some Discord replies omit a replied-user mention; verify the referenced message.
+  if (
+    !direct &&
+    message.reference &&
+    message.reference.messageId &&
+    message.channel.messages &&
+    typeof message.channel.messages.fetch === 'function'
+  ) {
+    try {
+      const referencedMessage = await message.channel.messages.fetch(message.reference.messageId);
+      direct = Boolean(
+        referencedMessage &&
+        referencedMessage.author &&
+        referencedMessage.author.id === client.user.id
+      );
+    } catch {
+      // If the referenced message is unavailable, continue without treating it as direct.
+    }
+  }
 
   addToHistory(message.channel.id, {
     authorId: message.author.id,
@@ -245,7 +267,7 @@ async function handleMessage(message) {
     createdAt: Date.now(),
   });
 
-  // The local policy can abstain before a prompt or user message is sent to Gemini.
+  // Stay silent and do not send high-risk source messages to Gemini.
   if (containsHighRiskTopic(text)) return;
 
   const chanceEligible = !direct && config.conversation.autoChatEnabled &&
