@@ -11,6 +11,7 @@ const {
 
 const config = require('./config');
 const { checkGeminiConnection, generateDecision, getConfiguredKeyCount } = require('./ai');
+const { createChannelStateStore, createTaskLimiter } = require('./runtime');
 const {
   containsHighRiskTopic,
   shouldConsiderSpontaneous,
@@ -25,104 +26,26 @@ const client = new Client({
   ],
 });
 
-const channelHistory = new Map();
 const channelQueues = new Map();
 const channelActivity = new Map();
 const channelPendingCounts = new Map();
-const aiRequestQueue = [];
-const MAX_STORED_MESSAGES = 30;
-const MAX_TRACKED_CHANNELS = 500;
-const CHANNEL_STATE_TTL_MS = 30 * 60 * 1000;
 const MAX_PENDING_PER_CHANNEL = 3;
 const TEN_MINUTES_MS = 10 * 60 * 1000;
-let activeAIRequests = 0;
+const channelStore = createChannelStateStore({
+  maxChannels: 500,
+  maxMessages: 30,
+  ttlMs: 30 * 60 * 1000,
+  isBusy: channelId => channelQueues.has(channelId),
+  onEvict: channelId => channelActivity.delete(channelId),
+});
+const aiLimiter = createTaskLimiter({
+  maxConcurrent: config.conversation.maxConcurrentAIRequests,
+  maxPending: config.conversation.maxPendingAIRequests,
+});
 
 function log(message) {
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
   console.log('[' + timestamp + '] [Gree] ' + message);
-}
-
-function evictChannelState(channelId) {
-  channelHistory.delete(channelId);
-  channelActivity.delete(channelId);
-}
-
-function pruneChannelState(now = Date.now()) {
-  for (const [channelId, history] of channelHistory) {
-    const lastEntry = history[history.length - 1];
-    const lastActivityAt = lastEntry && Number.isFinite(lastEntry.createdAt)
-      ? lastEntry.createdAt
-      : 0;
-
-    if (
-      !channelQueues.has(channelId) &&
-      now - lastActivityAt > CHANNEL_STATE_TTL_MS
-    ) {
-      evictChannelState(channelId);
-    }
-  }
-}
-
-function ensureChannelTracked(channelId) {
-  if (channelHistory.has(channelId)) return true;
-
-  const now = Date.now();
-  pruneChannelState(now);
-
-  if (channelHistory.size < MAX_TRACKED_CHANNELS) return true;
-
-  let oldestChannelId = null;
-  let oldestActivityAt = Infinity;
-
-  for (const [candidateId, history] of channelHistory) {
-    if (candidateId === channelId || channelQueues.has(candidateId)) continue;
-    const lastEntry = history[history.length - 1];
-    const activityAt = lastEntry && Number.isFinite(lastEntry.createdAt)
-      ? lastEntry.createdAt
-      : 0;
-
-    if (activityAt < oldestActivityAt) {
-      oldestActivityAt = activityAt;
-      oldestChannelId = candidateId;
-    }
-  }
-
-  if (oldestChannelId === null) return false;
-  evictChannelState(oldestChannelId);
-  return true;
-}
-
-function drainAIRequestQueue() {
-  while (
-    activeAIRequests < config.conversation.maxConcurrentAIRequests &&
-    aiRequestQueue.length > 0
-  ) {
-    const item = aiRequestQueue.shift();
-    activeAIRequests++;
-
-    Promise.resolve()
-      .then(item.task)
-      .then(item.resolve, item.reject)
-      .finally(() => {
-        activeAIRequests--;
-        drainAIRequestQueue();
-      });
-  }
-}
-
-function runWithAIConcurrency(task) {
-  return new Promise((resolve, reject) => {
-    if (
-      activeAIRequests >= config.conversation.maxConcurrentAIRequests &&
-      aiRequestQueue.length >= config.conversation.maxPendingAIRequests
-    ) {
-      reject(new Error('AI request queue is full; this reply was skipped to prevent a backlog.'));
-      return;
-    }
-
-    aiRequestQueue.push({ task, resolve, reject });
-    drainAIRequestQueue();
-  });
 }
 
 function cleanIncomingContent(content, botUserId) {
@@ -150,21 +73,11 @@ function isAllowedChannel(channelId) {
 }
 
 function getHistory(channelId) {
-  return channelHistory.get(channelId) || [];
+  return channelStore.get(channelId);
 }
 
 function addToHistory(channelId, entry) {
-  if (!ensureChannelTracked(channelId)) return false;
-
-  const history = getHistory(channelId);
-  history.push(entry);
-
-  if (history.length > MAX_STORED_MESSAGES) {
-    history.splice(0, history.length - MAX_STORED_MESSAGES);
-  }
-
-  channelHistory.set(channelId, history);
-  return true;
+  return channelStore.add(channelId, entry);
 }
 
 function formatHistory(channelId) {
@@ -262,7 +175,7 @@ async function processCandidate(message, direct, latestMessage) {
   let decision;
 
   try {
-    decision = await runWithAIConcurrency(() => generateDecision({
+    decision = await aiLimiter.run(() => generateDecision({
       direct,
       context,
       latestMessage,

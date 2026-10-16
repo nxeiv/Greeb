@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node index.js",
-    "check": "node --check index.js && node --check ai.js && node --check config.js && node --check policy.js",
+    "check": "node --check index.js && node --check ai.js && node --check config.js && node --check policy.js && node --check runtime.js",
     "test": "node --test"
   },
   "license": "GPL-3.0-only",
