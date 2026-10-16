@@ -78,6 +78,13 @@ function setAiHealth(healthy) {
   }
 }
 
+function redactSecrets(value) {
+  return String(value || 'Unknown error')
+    .replace(/AIza[0-9A-Za-z_-]{30,}/g, '[redacted API key]')
+    .replace(/\b[\w-]{24,}\.[\w-]{6,}\.[\w-]{20,}\b/g, '[redacted Discord token]')
+    .replace(/\b(DISCORD_TOKEN|GEMINI_API_KEY(?:_[2-4])?)\s*[:=]\s*\S+/gi, '$1=[redacted]');
+}
+
 function logRateLimited(map, key, message, intervalMs = 60000) {
   const now = Date.now();
   const previous = map.get(key) || 0;
@@ -96,19 +103,13 @@ function logRateLimited(map, key, message, intervalMs = 60000) {
   }
 
   map.set(key, now);
-  const safeMessage = String(message || 'Unknown error')
-    .replace(/AIza[0-9A-Za-z_-]{30,}/g, '[redacted API key]')
-    .replace(/\s+/g, ' ')
-    .slice(0, 420);
+  const safeMessage = redactSecrets(message).replace(/\s+/g, ' ').slice(0, 420);
   log(safeMessage);
 }
 
 function logGeminiFailure(error) {
   const raw = String(error && error.message ? error.message : error || 'Unknown Gemini error');
-  const safeMessage = raw
-    .replace(/AIza[0-9A-Za-z_-]{30,}/g, '[redacted API key]')
-    .replace(/\s+/g, ' ')
-    .slice(0, 420);
+  const safeMessage = redactSecrets(raw).replace(/\s+/g, ' ').slice(0, 420);
   const signature = safeMessage.replace(/key slot \d+/gi, 'key slot [n]');
   logRateLimited(recentGeminiFailureLogs, signature, 'Gemini request failed: ' + safeMessage);
 }
@@ -413,9 +414,41 @@ client.once(Events.ClientReady, async readyClient => {
   await clearLegacyCommands();
 });
 
+let shutdownStarted = false;
+
+async function shutdown(reason) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  log('Shutting down after ' + reason + '.');
+
+  try {
+    await client.destroy();
+  } catch (error) {
+    process.exitCode = 1;
+    logRateLimited(
+      recentOperationalFailureLogs,
+      'shutdown',
+      'Error while closing Discord client: ' + (error && error.message ? error.message : error),
+    );
+  }
+}
+
+process.once('SIGINT', () => {
+  void shutdown('SIGINT');
+});
+
+process.once('SIGTERM', () => {
+  void shutdown('SIGTERM');
+});
+
 process.on('unhandledRejection', reason => {
-  const message = reason && reason.message ? reason.message : String(reason);
-  log('Unhandled rejection: ' + message);
+  process.exitCode = 1;
+  logRateLimited(
+    recentOperationalFailureLogs,
+    'unhandled-rejection',
+    'Unhandled rejection: ' + (reason && reason.message ? reason.message : String(reason)),
+  );
+  void shutdown('an unhandled promise rejection');
 });
 
 if (!config.discord.token) {
@@ -430,6 +463,7 @@ if (getConfiguredKeyCount() === 0) {
 
 log('Starting Discord client.');
 client.login(config.discord.token).catch(error => {
-  console.error('[Gree] Discord login failed: ' + error.message);
+  console.error('[Gree] Discord login failed: ' + redactSecrets(error && error.message ? error.message : error));
   process.exitCode = 1;
+  void shutdown('Discord login failure');
 });

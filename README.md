@@ -54,6 +54,12 @@ Gree is explicitly instructed not to make dark, offensive, controversial, or tar
 
 These are defensive checks, not a mathematical guarantee that an AI can never produce an inappropriate reply. Test the bot in a private server before enabling it in a busy community, and keep the ability to turn off unsolicited participation with GREE_AUTO_CHAT_ENABLED=false.
 
+## Gemini connection troubleshooting
+
+A regular Gemini API error is usually returned as JSON. If the startup log says the endpoint returned a generic HTML `403 Forbidden` page, Gree records that distinction, stops retrying backup keys for that response, and pauses further generation requests for five minutes. This prevents repeated failed calls and log spam; it does not bypass the denial.
+
+If the HTML `403` continues with a supported model and keys configured correctly, stop rotating keys or changing model names. Ask the hosting provider to investigate outbound connectivity to `generativelanguage.googleapis.com` and share the timestamp, HTTP status, and whether the response was HTML or JSON. Do not send API keys, bot tokens, or `.env` contents to support tickets or public chats.
+
 ## Checks
 
 Run npm run check for JavaScript syntax checks and npm test for the local conversation-policy tests.
