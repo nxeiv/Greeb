@@ -95,16 +95,91 @@ function parseDecision(rawText) {
   };
 }
 
+async function probeModelsEndpoint(apiKey) {
+  try {
+    const response = await fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1',
+      {
+        method: 'GET',
+        headers: { 'x-goog-api-key': apiKey },
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    const contentType = response.headers.get('content-type') || 'unknown content type';
+    const body = await response.text();
+
+    if (response.ok) {
+      return { ok: true, status: response.status, contentType };
+    }
+
+    const isHtml = /text\/html/i.test(contentType) || /<!doctype html|<html\b/i.test(body);
+    let detail = '';
+    if (!isHtml) {
+      try {
+        const parsed = JSON.parse(body);
+        detail = parsed?.error?.message || parsed?.message || '';
+      } catch {
+        detail = body.replace(/\s+/g, ' ').slice(0, 140);
+      }
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      contentType,
+      detail: isHtml ? 'HTML error page from Google' : (detail || 'non-success response'),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      contentType: 'unavailable',
+      detail: String(error && error.message ? error.message : error).replace(/\s+/g, ' ').slice(0, 140),
+    };
+  }
+}
+
+function summarizeGeminiFailure(error) {
+  const raw = String(error && error.message ? error.message : error);
+  const statusValue = error && (error.status || error.statusCode || error.response?.status);
+  let status = Number(statusValue);
+  if (!Number.isFinite(status) || status <= 0) {
+    const match = raw.match(/(?:HTTP\s+|Error\s+)(\d{3})/i);
+    status = match ? Number(match[1]) : null;
+  }
+
+  if (/<!doctype html|<html\b/i.test(raw)) {
+    return 'HTTP ' + (status || 'unknown') + ' with an HTML error page (not a normal Gemini API JSON error)';
+  }
+
+  let detail = raw;
+  try {
+    const parsed = JSON.parse(raw);
+    detail = parsed?.error?.message || parsed?.message || raw;
+  } catch {
+    detail = raw.replace(/\s+/g, ' ').slice(0, 180);
+  }
+
+  return (status ? 'HTTP ' + status + ': ' : '') + String(detail).replace(/\s+/g, ' ').slice(0, 180);
+}
+
 async function checkGeminiConnection() {
   const keys = getApiKeys();
   if (!keys.length) return { ok: false, message: 'No Gemini API key is configured.' };
 
   const model = config.gemini.model.replace(/^models\//, '');
-  let lastFailure = null;
+  const failures = [];
 
-  // Use the same official Google Gen AI SDK as the Main Bot. This makes the
-  // startup check exercise Gree's actual SDK-backed generation path.
+  // Diagnose the read-only Models endpoint separately from generation.
+  // This distinguishes a rejected key/project from a generation-specific
+  // HTML rejection at Google's frontend without ever logging the key.
   for (let index = 0; index < keys.length; index++) {
+    const modelsProbe = await probeModelsEndpoint(keys[index]);
+    const modelsSummary = modelsProbe.ok
+      ? 'models.list HTTP ' + modelsProbe.status
+      : 'models.list ' + (modelsProbe.status ? 'HTTP ' + modelsProbe.status : 'request failed') +
+        ': ' + modelsProbe.detail;
+
     try {
       const client = new GoogleGenAI({ apiKey: keys[index] });
       const response = await client.models.generateContent({
@@ -114,26 +189,27 @@ async function checkGeminiConnection() {
       });
 
       if (!String(response.text || '').trim()) {
-        lastFailure = new Error('The API returned no generated text.');
+        failures.push('key slot ' + (index + 1) + ': ' + modelsSummary + '; generateContent returned empty text');
         continue;
       }
 
       return {
         ok: true,
-        message: 'Gemini SDK generateContent succeeded for ' + model +
-          ' using configured key slot ' + (index + 1) + '.',
+        message: 'Gemini generateContent succeeded for ' + model +
+          ' using configured key slot ' + (index + 1) + ' (' + modelsSummary + ').',
       };
     } catch (error) {
-      const detail = error && error.message ? error.message : String(error);
-      lastFailure = new Error('key slot ' + (index + 1) + ': ' + detail.slice(0, 400));
+      failures.push(
+        'key slot ' + (index + 1) + ': ' + modelsSummary +
+        '; generateContent ' + summarizeGeminiFailure(error),
+      );
     }
   }
 
   return {
     ok: false,
-    message: 'Gemini SDK generateContent failed for all ' + keys.length +
-      ' configured key(s). Last result: ' +
-      (lastFailure ? lastFailure.message : 'unknown error'),
+    message: 'Gemini generation failed for all ' + keys.length + ' configured key(s). ' +
+      failures.join(' | ').slice(0, 1600),
   };
 }
 async function generateDecision(options) {
