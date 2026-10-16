@@ -95,74 +95,94 @@ function parseDecision(rawText) {
 }
 
 async function checkGeminiConnection() {
-  const key = getApiKeys()[0];
-  if (!key) return { ok: false, message: 'No Gemini API key is configured.' };
+  const keys = getApiKeys();
+  if (!keys.length) return { ok: false, message: 'No Gemini API key is configured.' };
 
-  try {
-    const response = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models',
-      {
-        method: 'GET',
-        headers: { 'x-goog-api-key': key },
-        signal: AbortSignal.timeout(10000),
-      },
-    );
+  const modelName = config.gemini.model.replace(/^models\//, '');
+  let lastFailure = null;
 
-    const responseText = await response.text();
-    let body;
+  // Probe the same generateContent endpoint used for real replies. Try each
+  // configured key without ever logging or returning the key itself.
+  for (let index = 0; index < keys.length; index++) {
     try {
-      body = JSON.parse(responseText);
-    } catch {
-      const contentType = response.headers.get('content-type') || 'unknown';
-      const preview = responseText.replace(/\s+/g, ' ').trim().slice(0, 140);
-      return {
-        ok: false,
-        message: 'Gemini model-list check returned non-JSON HTTP ' + response.status +
+      const response = await fetch(
+        'https://generativelanguage.googleapis.com/v1beta/models/' +
+          encodeURIComponent(modelName) + ':generateContent',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': keys[index],
+          },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: 'Reply with exactly OK.' }] }],
+            generationConfig: {
+              temperature: 0,
+              maxOutputTokens: 8,
+            },
+          }),
+          signal: AbortSignal.timeout(10000),
+        },
+      );
+
+      const responseText = await response.text();
+      let body;
+      try {
+        body = JSON.parse(responseText);
+      } catch {
+        const contentType = response.headers.get('content-type') || 'unknown';
+        const preview = responseText.replace(/\s+/g, ' ').trim().slice(0, 180);
+        lastFailure = new Error(
+          'key slot ' + (index + 1) + ' received non-JSON HTTP ' + response.status +
           ' (content-type: ' + contentType +
           (preview ? ', body starts with: ' + preview : ', empty body') + ').',
-      };
-    }
+        );
+        continue;
+      }
 
-    if (!response.ok) {
-      const apiMessage = body && body.error && body.error.message
-        ? body.error.message
-        : 'HTTP ' + response.status;
-      return { ok: false, message: 'Gemini model-list check failed: ' + apiMessage };
-    }
+      if (!response.ok) {
+        const apiMessage = body && body.error && body.error.message
+          ? body.error.message
+          : 'HTTP ' + response.status;
+        lastFailure = new Error(
+          'key slot ' + (index + 1) + ' received HTTP ' + response.status + ': ' + apiMessage,
+        );
+        continue;
+      }
 
-    const models = Array.isArray(body.models) ? body.models : [];
-    const modelName = 'models/' + config.gemini.model.replace(/^models\//, '');
-    const selected = models.find(model => model && model.name === modelName);
+      const generatedText = body && body.candidates && body.candidates[0] &&
+        body.candidates[0].content && Array.isArray(body.candidates[0].content.parts)
+        ? body.candidates[0].content.parts.map(part => part.text || '').join('').trim()
+        : '';
 
-    if (!selected) {
+      if (!generatedText) {
+        lastFailure = new Error(
+          'key slot ' + (index + 1) + ' received HTTP ' + response.status +
+          ', but the response contained no generated text.',
+        );
+        continue;
+      }
+
       return {
-        ok: false,
-        message: 'Gemini API is reachable, but the configured model was not in the returned model list: ' +
-          config.gemini.model + '. Check the model name and key access.',
+        ok: true,
+        message: 'generateContent succeeded for ' + config.gemini.model +
+          ' using configured key slot ' + (index + 1) + '.',
       };
+    } catch (error) {
+      lastFailure = new Error(
+        'key slot ' + (index + 1) + ': ' +
+          (error && error.message ? error.message : String(error)),
+      );
     }
-
-    const methods = Array.isArray(selected.supportedGenerationMethods)
-      ? selected.supportedGenerationMethods
-      : [];
-    if (!methods.includes('generateContent')) {
-      return {
-        ok: false,
-        message: 'Gemini API is reachable, but ' + config.gemini.model +
-          ' does not advertise generateContent for this key.',
-      };
-    }
-
-    return { ok: true, message: 'Gemini API reachable; configured model is listed for generateContent.' };
-  } catch (error) {
-    return {
-      ok: false,
-      message: 'Gemini model-list check could not complete: ' +
-        (error && error.message ? error.message : String(error)),
-    };
   }
-}
 
+  return {
+    ok: false,
+    message: 'Gemini generateContent preflight failed for all ' + keys.length +
+      ' configured key(s). Last result: ' +
+      (lastFailure ? lastFailure.message : 'unknown error'),
+  };
+}
 async function generateDecision(options) {
   const keys = getApiKeys();
   if (!keys.length) throw new Error('No Gemini API key is configured.');
