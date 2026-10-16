@@ -34,6 +34,58 @@ test('does not classify ordinary JSON 403 API errors as HTML frontend blocks', (
 });
 
 
+
+
+test('generation parses a valid decision and sends the safety and output schema', async () => {
+  let request;
+  const result = await generateDecision(
+    { direct: true, context: 'Member 1: hello', latestMessage: 'hey Gree' },
+    {
+      apiKeys: ['test-key'],
+      createClient: () => ({
+        models: {
+          generateContent: async value => {
+            request = value;
+            return { text: '{"shouldRespond":true,"message":"yesyes hi"}' };
+          },
+        },
+      }),
+    },
+  );
+
+  assert.deepEqual(result, { shouldRespond: true, message: 'yesyes hi' });
+  assert.equal(request.model.length > 0, true);
+  assert.match(request.config.systemInstruction, /UNTRUSTED INPUT BOUNDARIES/);
+  assert.match(request.config.systemInstruction, /APPROVED STYLE EXAMPLES/);
+  assert.equal(request.config.responseMimeType, 'application/json');
+  assert.deepEqual(request.config.responseSchema.required, ['shouldRespond', 'message']);
+  assert.match(request.contents[0].parts[0].text, /LATEST MESSAGE \\(untrusted content\\)/);
+});
+
+test('generation tries a backup key after a transient server error', async () => {
+  const triedKeys = [];
+  const result = await generateDecision(
+    { direct: true, context: '', latestMessage: 'hey Gree' },
+    {
+      apiKeys: ['test-key-one', 'test-key-two'],
+      createClient: key => ({
+        models: {
+          generateContent: async () => {
+            triedKeys.push(key);
+            if (key === 'test-key-one') {
+              throw Object.assign(new Error('HTTP 503: service unavailable'), { status: 503 });
+            }
+            return { text: '{"shouldRespond":false,"message":""}' };
+          },
+        },
+      }),
+    },
+  );
+
+  assert.deepEqual(triedKeys, ['test-key-one', 'test-key-two']);
+  assert.deepEqual(result, { shouldRespond: false, message: '' });
+});
+
 test('runtime generation stops at the first generic HTML 403 and starts a cooldown', async () => {
   let generationCalls = 0;
   const html = '<!doctype html><html><title>Error 403 (Forbidden)!!1</title></html>';
