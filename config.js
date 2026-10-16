@@ -28,8 +28,8 @@ function parseBoolean(value, fallback) {
 
 const config = {
   discord: {
-    token: process.env.DISCORD_TOKEN || '',
-    guildId: process.env.GUILD_ID || '',
+    token: String(process.env.DISCORD_TOKEN || '').trim(),
+    guildId: String(process.env.GUILD_ID || '').trim(),
   },
   gemini: {
     model: String(process.env.GEMINI_MODEL || '').trim() || 'gemini-3.6-flash',

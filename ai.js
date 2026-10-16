@@ -82,12 +82,15 @@ const SYSTEM_PROMPT = [
 ].join('\n');
 
 function getApiKeys() {
-  return [
+  const keys = [
     process.env.GEMINI_API_KEY,
     process.env.GEMINI_API_KEY_2,
     process.env.GEMINI_API_KEY_3,
     process.env.GEMINI_API_KEY_4,
-  ].map(key => (key || '').trim()).filter(Boolean);
+  ].map(key => String(key || '').trim()).filter(Boolean);
+
+  // Duplicate environment values should never trigger duplicate API requests.
+  return [...new Set(keys)];
 }
 
 function getConfiguredKeyCount() {

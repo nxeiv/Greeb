@@ -7,7 +7,11 @@ const { spawnSync } = require('node:child_process');
 function loadConfig(overrides = {}) {
   const script = [
     "const config = require('./config');",
+    "const ai = require('./ai');",
     "process.stdout.write(JSON.stringify({",
+    "  discordToken: config.discord.token,",
+    "  guildId: config.discord.guildId,",
+    "  configuredKeyCount: ai.getConfiguredKeyCount(),",
     "  model: config.gemini.model,",
     "  autoChatEnabled: config.conversation.autoChatEnabled,",
     "  autoChatChance: config.conversation.autoChatChance,",
@@ -24,7 +28,11 @@ function loadConfig(overrides = {}) {
     env: {
       ...process.env,
       DISCORD_TOKEN: 'test-token',
+      GUILD_ID: '',
       GEMINI_API_KEY: 'test-key',
+      GEMINI_API_KEY_2: '',
+      GEMINI_API_KEY_3: '',
+      GEMINI_API_KEY_4: '',
       GEMINI_MODEL: '',
       GREE_AUTO_CHAT_ENABLED: '',
       GREE_AUTO_CHAT_CHANCE: '',
@@ -43,6 +51,9 @@ function loadConfig(overrides = {}) {
 test('blank environment values use documented defaults', () => {
   const config = loadConfig();
 
+  assert.equal(config.discordToken, 'test-token');
+  assert.equal(config.guildId, '');
+  assert.equal(config.configuredKeyCount, 1);
   assert.equal(config.model, 'gemini-3.6-flash');
   assert.equal(config.autoChatEnabled, true);
   assert.equal(config.autoChatChance, 0.06);
@@ -85,3 +96,21 @@ test('invalid booleans and fractions safely fall back', () => {
   assert.equal(config.autoChatEnabled, true);
   assert.equal(config.autoChatChance, 0.06);
 });
+
+test('credentials and model names are trimmed, and duplicate API keys are counted once', () => {
+  const config = loadConfig({
+    DISCORD_TOKEN: '  test-token  ',
+    GUILD_ID: '  123456789  ',
+    GEMINI_API_KEY: '  duplicate-key  ',
+    GEMINI_API_KEY_2: 'duplicate-key',
+    GEMINI_API_KEY_3: ' second-key ',
+    GEMINI_API_KEY_4: '',
+    GEMINI_MODEL: '  gemini-test-model  ',
+  });
+
+  assert.equal(config.discordToken, 'test-token');
+  assert.equal(config.guildId, '123456789');
+  assert.equal(config.model, 'gemini-test-model');
+  assert.equal(config.configuredKeyCount, 2);
+});
+
