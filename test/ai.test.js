@@ -33,6 +33,33 @@ test('does not classify ordinary JSON 403 API errors as HTML frontend blocks', (
   assert.match(summarizeGeminiFailure(error), /API key is invalid/);
 });
 
+
+test('runtime generation stops at the first generic HTML 403 and starts a cooldown', async () => {
+  let generationCalls = 0;
+  const html = '<!doctype html><html><title>Error 403 (Forbidden)!!1</title></html>';
+
+  await assert.rejects(
+    generateDecision(
+      { direct: true, context: 'Member 1: hello', latestMessage: 'hey Gree' },
+      {
+        apiKeys: ['test-key-one', 'test-key-two', 'test-key-three'],
+        createClient: () => ({
+          models: {
+            generateContent: async () => {
+              generationCalls++;
+              throw Object.assign(new Error(html), { status: 403 });
+            },
+          },
+        }),
+      },
+    ),
+    /Backup keys were not retried/,
+  );
+
+  assert.equal(generationCalls, 1);
+  assert.ok(getHtml403CooldownRemainingMs() > 0);
+});
+
 test('preflight stops after the first HTML 403 instead of cycling backup keys', async () => {
   const html = '<!doctype html><html><title>Error 403 (Forbidden)!!1</title><body>Permission denied</body></html>';
   let fetchCalls = 0;

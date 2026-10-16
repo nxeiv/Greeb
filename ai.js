@@ -277,7 +277,7 @@ async function checkGeminiConnection(options = {}) {
   };
 }
 
-async function generateDecision(options) {
+async function generateDecision(options, dependencies = {}) {
   const cooldownRemaining = getHtml403CooldownRemainingMs();
   if (cooldownRemaining > 0) {
     throw new Error(
@@ -286,7 +286,9 @@ async function generateDecision(options) {
     );
   }
 
-  const keys = getApiKeys();
+  const keys = Array.isArray(dependencies.apiKeys)
+    ? dependencies.apiKeys.map(key => String(key || '').trim()).filter(Boolean)
+    : getApiKeys();
   if (!keys.length) throw new Error('No Gemini API key is configured.');
 
   const requestText = [
@@ -309,7 +311,9 @@ async function generateDecision(options) {
 
   for (let index = 0; index < keys.length; index++) {
     try {
-      const client = createGeminiClient(keys[index]);
+      const client = typeof dependencies.createClient === 'function'
+        ? dependencies.createClient(keys[index])
+        : createGeminiClient(keys[index]);
       const response = await client.models.generateContent({
         model,
         contents: [{ role: 'user', parts: [{ text: requestText }] }],
