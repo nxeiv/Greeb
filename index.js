@@ -179,8 +179,9 @@ async function processCandidate(message, direct, latestMessage) {
       direct,
       context,
       latestMessage,
-    }));
+    }), { priority: direct ? 'high' : 'normal' });
   } catch (error) {
+    if (error && /reprioritized for a direct mention/.test(error.message || '')) return;
     log('Gemini request failed: ' + error.message);
     return;
   }

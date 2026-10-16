@@ -137,3 +137,41 @@ test('task limiter continues draining after a task rejects', async () => {
   assert.equal(await limiter.run(async () => 'still works'), 'still works');
   assert.equal(limiter.getStats().active, 0);
 });
+
+test('direct mentions are prioritized over queued unsolicited requests', async () => {
+  const limiter = createTaskLimiter({ maxConcurrent: 1, maxPending: 2 });
+  const executionOrder = [];
+  let releaseFirst;
+
+  const first = limiter.run(() => new Promise(resolve => {
+    releaseFirst = value => {
+      executionOrder.push('first');
+      resolve(value);
+    };
+  }));
+
+  await new Promise(resolve => setImmediate(resolve));
+
+  const unsolicitedOne = limiter.run(async () => {
+    executionOrder.push('unsolicited-one');
+    return 'one';
+  });
+  const unsolicitedTwo = limiter.run(async () => {
+    executionOrder.push('unsolicited-two');
+    return 'two';
+  });
+
+  const direct = limiter.run(async () => {
+    executionOrder.push('direct');
+    return 'direct';
+  }, { priority: 'high' });
+
+  await assert.rejects(unsolicitedTwo, /reprioritized for a direct mention/);
+
+  releaseFirst('first');
+  assert.equal(await first, 'first');
+  assert.equal(await direct, 'direct');
+  assert.equal(await unsolicitedOne, 'one');
+  assert.deepEqual(executionOrder, ['first', 'direct', 'unsolicited-one']);
+});
+

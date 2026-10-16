@@ -118,17 +118,42 @@ function createTaskLimiter(options = {}) {
     }
   }
 
-  function run(task) {
+  function run(task, options = {}) {
     if (typeof task !== 'function') {
       return Promise.reject(new TypeError('Task limiter expects a function.'));
     }
 
+    const priority = options.priority === 'high' ? 1 : 0;
+
     if (active >= maxConcurrent && queue.length >= maxPending) {
-      return Promise.reject(new Error('AI request queue is full; this reply was skipped to prevent a backlog.'));
+      let evictIndex = -1;
+
+      // When a direct mention arrives, let it replace a queued unsolicited
+      // reply rather than making the user wait behind speculative activity.
+      if (priority === 1) {
+        for (let index = queue.length - 1; index >= 0; index--) {
+          if (queue[index].priority === 0) {
+            evictIndex = index;
+            break;
+          }
+        }
+      }
+
+      if (evictIndex < 0) {
+        return Promise.reject(new Error('AI request queue is full; this reply was skipped to prevent a backlog.'));
+      }
+
+      const [evicted] = queue.splice(evictIndex, 1);
+      evicted.reject(new Error('AI request queue was reprioritized for a direct mention; this reply was skipped.'));
     }
 
     return new Promise((resolve, reject) => {
-      queue.push({ task, resolve, reject });
+      const item = { task, resolve, reject, priority };
+      const insertBefore = queue.findIndex(queued => queued.priority < priority);
+
+      if (insertBefore < 0) queue.push(item);
+      else queue.splice(insertBefore, 0, item);
+
       drain();
     });
   }
