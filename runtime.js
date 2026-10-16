@@ -273,4 +273,5 @@ function createPerKeyTaskScheduler(options = {}) {
 module.exports = {
   createChannelStateStore,
   createTaskLimiter,
+  createPerKeyTaskScheduler,
 };
