@@ -1,6 +1,7 @@
 'use strict';
 
 const config = require('./config');
+const { GoogleGenAI } = require('@google/genai');
 
 function loadApprovedExamples() {
   try {
@@ -98,87 +99,39 @@ async function checkGeminiConnection() {
   const keys = getApiKeys();
   if (!keys.length) return { ok: false, message: 'No Gemini API key is configured.' };
 
-  const modelName = config.gemini.model.replace(/^models\//, '');
+  const model = config.gemini.model.replace(/^models\//, '');
   let lastFailure = null;
 
-  // Probe the same generateContent endpoint used for real replies. Try each
-  // configured key without ever logging or returning the key itself.
+  // Use the same official Google Gen AI SDK as the Main Bot. This makes the
+  // startup check exercise Gree's actual SDK-backed generation path.
   for (let index = 0; index < keys.length; index++) {
     try {
-      const response = await fetch(
-        'https://generativelanguage.googleapis.com/v1beta/models/' +
-          encodeURIComponent(modelName) + ':generateContent',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': keys[index],
-          },
-          body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: 'Reply with exactly OK.' }] }],
-            generationConfig: {
-              temperature: 0,
-              maxOutputTokens: 8,
-            },
-          }),
-          signal: AbortSignal.timeout(10000),
-        },
-      );
+      const client = new GoogleGenAI({ apiKey: keys[index] });
+      const response = await client.models.generateContent({
+        model,
+        contents: 'Reply with exactly OK.',
+        config: { temperature: 0, maxOutputTokens: 8 },
+      });
 
-      const responseText = await response.text();
-      let body;
-      try {
-        body = JSON.parse(responseText);
-      } catch {
-        const contentType = response.headers.get('content-type') || 'unknown';
-        const preview = responseText.replace(/\s+/g, ' ').trim().slice(0, 180);
-        lastFailure = new Error(
-          'key slot ' + (index + 1) + ' received non-JSON HTTP ' + response.status +
-          ' (content-type: ' + contentType +
-          (preview ? ', body starts with: ' + preview : ', empty body') + ').',
-        );
-        continue;
-      }
-
-      if (!response.ok) {
-        const apiMessage = body && body.error && body.error.message
-          ? body.error.message
-          : 'HTTP ' + response.status;
-        lastFailure = new Error(
-          'key slot ' + (index + 1) + ' received HTTP ' + response.status + ': ' + apiMessage,
-        );
-        continue;
-      }
-
-      const generatedText = body && body.candidates && body.candidates[0] &&
-        body.candidates[0].content && Array.isArray(body.candidates[0].content.parts)
-        ? body.candidates[0].content.parts.map(part => part.text || '').join('').trim()
-        : '';
-
-      if (!generatedText) {
-        lastFailure = new Error(
-          'key slot ' + (index + 1) + ' received HTTP ' + response.status +
-          ', but the response contained no generated text.',
-        );
+      if (!String(response.text || '').trim()) {
+        lastFailure = new Error('The API returned no generated text.');
         continue;
       }
 
       return {
         ok: true,
-        message: 'generateContent succeeded for ' + config.gemini.model +
+        message: 'Gemini SDK generateContent succeeded for ' + model +
           ' using configured key slot ' + (index + 1) + '.',
       };
     } catch (error) {
-      lastFailure = new Error(
-        'key slot ' + (index + 1) + ': ' +
-          (error && error.message ? error.message : String(error)),
-      );
+      const detail = error && error.message ? error.message : String(error);
+      lastFailure = new Error('key slot ' + (index + 1) + ': ' + detail.slice(0, 400));
     }
   }
 
   return {
     ok: false,
-    message: 'Gemini generateContent preflight failed for all ' + keys.length +
+    message: 'Gemini SDK generateContent failed for all ' + keys.length +
       ' configured key(s). Last result: ' +
       (lastFailure ? lastFailure.message : 'unknown error'),
   };
@@ -202,82 +155,46 @@ async function generateDecision(options) {
     options.latestMessage,
   ].join('\n');
 
+  const model = config.gemini.model.replace(/^models\//, '');
   let lastError = null;
 
   for (let index = 0; index < keys.length; index++) {
     try {
-      const response = await fetch(
-        'https://generativelanguage.googleapis.com/v1beta/models/' +
-          encodeURIComponent(config.gemini.model) + ':generateContent',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': keys[index],
+      const client = new GoogleGenAI({ apiKey: keys[index] });
+      const response = await client.models.generateContent({
+        model,
+        contents: [{ role: 'user', parts: [{ text: requestText }] }],
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+          temperature: 0.9,
+          maxOutputTokens: 320,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'OBJECT',
+            properties: {
+              shouldRespond: { type: 'BOOLEAN' },
+              message: { type: 'STRING' },
+            },
+            required: ['shouldRespond', 'message'],
+            propertyOrdering: ['shouldRespond', 'message'],
           },
-          body: JSON.stringify({
-            system_instruction: {
-              parts: [{ text: SYSTEM_PROMPT }],
-            },
-            contents: [{
-              role: 'user',
-              parts: [{ text: requestText }],
-            }],
-            generationConfig: {
-              temperature: 0.9,
-              maxOutputTokens: 320,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: 'OBJECT',
-                properties: {
-                  shouldRespond: { type: 'BOOLEAN' },
-                  message: { type: 'STRING' },
-                },
-                required: ['shouldRespond', 'message'],
-                propertyOrdering: ['shouldRespond', 'message'],
-              },
-            },
-          }),
-          signal: AbortSignal.timeout(30000),
         },
-      );
+      });
 
-      const responseText = await response.text();
-      let body;
-      try {
-        body = JSON.parse(responseText);
-      } catch {
-        const contentType = response.headers.get('content-type') || 'unknown';
-        const preview = responseText.replace(/\s+/g, ' ').trim().slice(0, 180);
-        throw new Error(
-          'Gemini returned a non-JSON response (HTTP ' + response.status +
-          ', content-type: ' + contentType +
-          (preview ? ', body starts with: ' + preview : ', empty body') +
-          '). Check the hosting network/proxy response and Gemini endpoint.',
-        );
-      }
-
-      if (response.ok) {
-        const rawText = body && body.candidates && body.candidates[0] &&
-          body.candidates[0].content && body.candidates[0].content.parts
-          ? body.candidates[0].content.parts.map(part => part.text || '').join('').trim()
-          : '';
-
-        if (!rawText) throw new Error('Gemini returned an empty response.');
-        return parseDecision(rawText);
-      }
-
-      const apiMessage = body && body.error && body.error.message
-        ? body.error.message
-        : 'HTTP ' + response.status;
-      lastError = new Error('Gemini key ' + (index + 1) + ' failed: ' + apiMessage);
-
-      // A 429 commonly reflects project-level quota. Trying sibling keys
-      // from the same project immediately just repeats a doomed request.
-      if (response.status === 429) break;
-      if (![401, 403, 500, 502, 503, 504].includes(response.status)) break;
+      const rawText = String(response.text || '').trim();
+      if (!rawText) throw new Error('Gemini returned an empty response.');
+      return parseDecision(rawText);
     } catch (error) {
-      lastError = error;
+      const detail = error && error.message ? error.message : String(error);
+      lastError = new Error('Gemini key slot ' + (index + 1) + ' failed: ' + detail.slice(0, 800));
+
+      const statusValue = error && (error.status || error.statusCode || error.code);
+      const status = Number(statusValue);
+      // 429 commonly reflects project-level quota, so sibling keys are unlikely
+      // to help. For access/availability errors, try the configured backups.
+      if (status === 429 || String(statusValue) === '429') break;
+      if (Number.isFinite(status) && status > 0 &&
+          ![401, 403, 500, 502, 503, 504].includes(status)) break;
     }
   }
 
