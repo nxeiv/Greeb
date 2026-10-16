@@ -175,7 +175,10 @@ async function generateDecision(options) {
         : 'HTTP ' + response.status;
       lastError = new Error('Gemini key ' + (index + 1) + ' failed: ' + apiMessage);
 
-      if (![401, 403, 429, 500, 502, 503, 504].includes(response.status)) break;
+      // A 429 commonly reflects project-level quota. Trying sibling keys
+      // from the same project immediately just repeats a doomed request.
+      if (response.status === 429) break;
+      if (![401, 403, 500, 502, 503, 504].includes(response.status)) break;
     } catch (error) {
       lastError = error;
     }
