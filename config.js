@@ -2,55 +2,56 @@
 
 require('dotenv').config();
 
-function parsePositiveInteger(value, fallback) {
+function parsePositiveInteger(value, fallback, maximum) {
   const parsed = Number.parseInt(value, 10);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return fallback;
+  return maximum ? Math.min(parsed, maximum) : parsed;
 }
 
-const reconnectInitialDelayMs = parsePositiveInteger(
-  process.env.RECONNECT_INITIAL_DELAY_MS,
-  60_000,
-);
-const reconnectMaxDelayMs = Math.max(
-  reconnectInitialDelayMs,
-  parsePositiveInteger(process.env.RECONNECT_MAX_DELAY_MS, 300_000),
-);
+function parseFraction(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 0.25) return fallback;
+  return parsed;
+}
+
+function parseBoolean(value, fallback) {
+  if (value == null || value.trim() === '') return fallback;
+  if (/^(true|1|yes|on)$/i.test(value.trim())) return true;
+  if (/^(false|0|no|off)$/i.test(value.trim())) return false;
+  return fallback;
+}
 
 const config = {
   discord: {
     token: process.env.DISCORD_TOKEN || '',
-    clientId: process.env.CLIENT_ID || '1551183833037144135',
-    guildId: process.env.GUILD_ID || '1507392744492896418',
-    statusChannelId: process.env.STATUS_CHANNEL_ID || '1551186617635704832',
+    guildId: process.env.GUILD_ID || '',
   },
-  server: {
-    ip: process.env.MC_SERVER_IP || 'the-cottage-c1-s5.play.hosting',
-    port: parsePositiveInteger(process.env.MC_SERVER_PORT, 25565),
-    version: process.env.MC_SERVER_VERSION === 'auto'
-      ? false
-      : (process.env.MC_SERVER_VERSION || '1.21.11'),
+  gemini: {
+    model: process.env.GEMINI_MODEL || 'gemini-3.6-flash',
   },
-  bot: {
-    username: process.env.MC_USERNAME || 'Anonymous',
-    password: process.env.MC_PASSWORD || '',
-    auth: process.env.MC_AUTH || 'offline',
-  },
-  reconnect: {
-    initialDelayMs: reconnectInitialDelayMs,
-    maxDelayMs: reconnectMaxDelayMs,
+  conversation: {
+    autoChatEnabled: parseBoolean(process.env.GREE_AUTO_CHAT_ENABLED, true),
+    autoChatChance: parseFraction(process.env.GREE_AUTO_CHAT_CHANCE, 0.06),
+    unsolicitedCooldownMs: parsePositiveInteger(
+      process.env.GREE_UNSOLICITED_COOLDOWN_MS,
+      60000,
+      3600000,
+    ),
+    maxUnsolicitedPerTenMinutes: parsePositiveInteger(
+      process.env.GREE_MAX_UNSOLICITED_PER_10_MINUTES,
+      3,
+      20,
+    ),
+    contextMessages: parsePositiveInteger(
+      process.env.GREE_CONTEXT_MESSAGES,
+      15,
+      30,
+    ),
+    channelIds: (process.env.GREE_CHANNEL_IDS || '')
+      .split(',')
+      .map(value => value.trim())
+      .filter(Boolean),
   },
 };
-
-const missing = [];
-if (!config.discord.token) missing.push('DISCORD_TOKEN');
-if (!config.discord.clientId) missing.push('CLIENT_ID');
-if (!config.discord.guildId) missing.push('GUILD_ID');
-if (!config.server.ip) missing.push('MC_SERVER_IP');
-
-if (missing.length > 0) {
-  console.error(`[Config] Missing required environment variables: ${missing.join(', ')}.`);
-  console.error('[Config] Add the missing values and restart the bot.');
-  process.exit(1);
-}
 
 module.exports = config;

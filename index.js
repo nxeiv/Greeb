@@ -3,18 +3,19 @@
 const {
   ActivityType,
   Client,
-  Colors,
-  EmbedBuilder,
   Events,
   GatewayIntentBits,
   REST,
   Routes,
-  SlashCommandBuilder,
 } = require('discord.js');
 
 const config = require('./config');
-const mc = require('./minecraft');
-const { summarizeChannel, handleSummaryButton } = require('./summary');
+const { generateDecision, getConfiguredKeyCount } = require('./ai');
+const {
+  containsHighRiskTopic,
+  shouldConsiderSpontaneous,
+  validateReply,
+} = require('./policy');
 
 const client = new Client({
   intents: [
@@ -24,589 +25,318 @@ const client = new Client({
   ],
 });
 
-const commands = [
-  new SlashCommandBuilder()
-    .setName('start')
-    .setDescription('Starts AFK Session'),
+const channelHistory = new Map();
+const channelQueues = new Map();
+const channelActivity = new Map();
+const MAX_STORED_MESSAGES = 30;
+const TEN_MINUTES_MS = 10 * 60 * 1000;
 
-  new SlashCommandBuilder()
-    .setName('stop')
-    .setDescription('Stops AFK Session'),
-
-  new SlashCommandBuilder()
-    .setName('status')
-    .setDescription('Shows AFK Status'),
-].map(command => command.toJSON());
-
-function log(tag, message) {
+function log(message) {
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  console.log(`[${timestamp}] [${tag}] ${message}`);
+  console.log('[' + timestamp + '] [Gree] ' + message);
 }
 
-function formatUptime(totalSeconds) {
-  if (!totalSeconds) return '0s';
+function cleanIncomingContent(content, botUserId) {
+  let text = String(content || '');
 
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-
-  return [
-    hours && `${hours}h`,
-    minutes && `${minutes}m`,
-    `${seconds}s`,
-  ].filter(Boolean).join(' ');
-}
-
-function formatDelay(delayMs) {
-  const seconds = Math.round(delayMs / 1000);
-
-  if (seconds % 60 === 0) {
-    const minutes = seconds / 60;
-    return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  if (botUserId) {
+    text = text.replace(new RegExp('<@!?' + botUserId + '>', 'g'), ' ');
   }
 
-  return `${seconds} seconds`;
-}
-
-function getBotState(status) {
-  if (status.connected) return 'Online';
-  if (status.connecting || status.reconnecting) return 'Reconnecting';
-  return 'Offline';
-}
-
-function createEmbed(title, color) {
-  return new EmbedBuilder()
-    .setTitle(title)
-    .setColor(color)
-    .setFooter({ text: 'By Makkrabb' })
-    .setTimestamp();
-}
-
-function buildStatusEmbed(status, title, color) {
-  return createEmbed(title, color)
-    .addFields(
-      {
-        name: 'Server',
-        value: `\`${status.server}\``,
-        inline: true,
-      },
-      {
-        name: 'Bot Status',
-        value: getBotState(status),
-        inline: true,
-      },
-      {
-        name: 'Players Online',
-        value: String(status.playerCount),
-        inline: true,
-      },
-      {
-        name: 'Uptime',
-        value: status.connected
-          ? formatUptime(status.uptime)
-          : 'Not connected',
-        inline: true,
-      },
-      {
-        name: 'Reconnect Attempts',
-        value: String(status.reconnectAttempts),
-        inline: true,
-      },
-      {
-        name: 'Bot Name',
-        value: `\`${config.bot.username}\``,
-        inline: true,
-      },
-    );
-}
-
-function shorten(text, limit = 1000) {
-  const normalized = String(text || 'Unknown reason')
+  return text
+    .replace(/<@!?[0-9]+>/g, '@member')
+    .replace(/<@&[0-9]+>/g, '@role')
+    .replace(/<#[0-9]+>/g, '#channel')
+    .replace(/https?:\/\/\S+/gi, '[link omitted]')
+    .replace(/www\.\S+/gi, '[link omitted]')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .replace(/\s+/g, ' ')
-    .trim();
-
-  return normalized.length > limit
-    ? `${normalized.slice(0, limit - 3)}...`
-    : normalized;
+    .trim()
+    .slice(0, 1200);
 }
 
-async function registerCommands() {
-  const rest = new REST({ version: '10' })
-    .setToken(config.discord.token);
+function isAllowedChannel(channelId) {
+  return config.conversation.channelIds.length === 0 ||
+    config.conversation.channelIds.includes(channelId);
+}
 
-  const route = Routes.applicationGuildCommands(
-    config.discord.clientId,
-    config.discord.guildId,
-  );
+function getHistory(channelId) {
+  return channelHistory.get(channelId) || [];
+}
 
-  try {
-    log('Discord', 'Checking existing slash commands...');
+function addToHistory(channelId, entry) {
+  const history = getHistory(channelId);
+  history.push(entry);
 
-    const existing = await rest.get(route);
-
-    log(
-      'Discord',
-      `Discord currently reports ${existing.length} guild command(s).`,
-    );
-
-    for (const command of existing) {
-      log(
-        'Discord',
-        `Existing command: /${command.name} (${command.id})`,
-      );
-    }
-
-    log('Discord', 'Registering slash commands...');
-
-    const registered = await rest.put(route, {
-      body: commands,
-    });
-
-    log(
-      'Discord',
-      `Slash commands registered successfully: ${registered.length} command(s).`,
-    );
-
-    for (const command of registered) {
-      log(
-        'Discord',
-        `Registered command: /${command.name} (${command.id})`,
-      );
-    }
-  } catch (error) {
-    log(
-      'Discord',
-      `Unable to register slash commands: ${error.message}`,
-    );
+  if (history.length > MAX_STORED_MESSAGES) {
+    history.splice(0, history.length - MAX_STORED_MESSAGES);
   }
+
+  channelHistory.set(channelId, history);
 }
 
-let commandWatchdogRunning = false;
+function formatHistory(channelId) {
+  const history = getHistory(channelId)
+    .slice(-config.conversation.contextMessages)
+    .filter(entry => !containsHighRiskTopic(entry.content));
+  const labels = new Map();
+  let nextMemberNumber = 1;
 
-async function commandWatchdog() {
-  if (commandWatchdogRunning) return;
+  return history.map(entry => {
+    let label;
 
-  commandWatchdogRunning = true;
-
-  try {
-    const rest = new REST({ version: '10' })
-      .setToken(config.discord.token);
-
-    const route = Routes.applicationGuildCommands(
-      config.discord.clientId,
-      config.discord.guildId,
-    );
-
-    const existing = await rest.get(route);
-
-    const existingNames = new Set(
-      existing.map(command => command.name),
-    );
-
-    const expectedNames = new Set(
-      commands.map(command => command.name),
-    );
-
-    const missing = commands.filter(
-      command => !existingNames.has(command.name),
-    );
-
-    const unexpected = existing.filter(
-      command => !expectedNames.has(command.name),
-    );
-
-    if (missing.length === 0 && unexpected.length === 0) {
-      log(
-        'Watchdog',
-        `Slash commands OK (${existing.length}/${commands.length}).`,
-      );
-      return;
-    }
-
-    if (missing.length > 0) {
-      log(
-        'Watchdog',
-        `Missing commands detected: ${missing
-          .map(command => `/${command.name}`)
-          .join(', ')}`,
-      );
-    }
-
-    if (unexpected.length > 0) {
-      log(
-        'Watchdog',
-        `Unexpected commands detected: ${unexpected
-          .map(command => `/${command.name}`)
-          .join(', ')}`,
-      );
-    }
-
-    await rest.put(route, {
-      body: commands,
-    });
-
-    log(
-      'Watchdog',
-      `Slash commands repaired successfully (${commands.length} command(s)).`,
-    );
-  } catch (error) {
-    log(
-      'Watchdog',
-      `Command check failed: ${error.message}`,
-    );
-  } finally {
-    commandWatchdogRunning = false;
-  }
-}
-
-async function notifyChannel(embed) {
-  if (!config.discord.statusChannelId) return;
-
-  try {
-    const channel = await client.channels.fetch(
-      config.discord.statusChannelId,
-    );
-
-    if (!channel?.isTextBased()) {
-      log(
-        'Discord',
-        'The configured status channel is not a text channel.',
-      );
-      return;
-    }
-
-    await channel.send({
-      embeds: [embed],
-    });
-    statusChannelWarningShown = false;
-  } catch (error) {
-    if (error.code === 10003 || error.code === 50001) {
-      if (!statusChannelWarningShown) {
-        log(
-          'Discord',
-          `Status channel is unavailable or inaccessible (code ${error.code}). Check STATUS_CHANNEL_ID and the bot's View Channel/Send Messages permissions.`,
-        );
-        statusChannelWarningShown = true;
+    if (entry.isGree) {
+      label = 'Gree';
+    } else {
+      if (!labels.has(entry.authorId)) {
+        labels.set(entry.authorId, 'Member ' + nextMemberNumber);
+        nextMemberNumber++;
       }
-      return;
+      label = labels.get(entry.authorId);
     }
 
-    log(
-      'Discord',
-      `Unable to send a status update: ${error.message}`,
-    );
+    return label + ': ' + entry.content;
+  }).join('\n');
+}
+
+function getActivity(channelId) {
+  if (!channelActivity.has(channelId)) {
+    channelActivity.set(channelId, {
+      lastUnsolicitedAt: 0,
+      lastDirectStartedAt: 0,
+      responses: [],
+      unsolicited: [],
+    });
   }
+
+  return channelActivity.get(channelId);
 }
 
-let statusChannelWarningShown = false;
+function canStartResponse(channelId, direct) {
+  const activity = getActivity(channelId);
+  const now = Date.now();
 
-function updatePresence() {
-  if (!client.user) return;
+  activity.responses = activity.responses.filter(time => now - time < 60000);
+  if (activity.responses.length >= 8) return false;
 
-  const status = mc.getStatus();
-  const reconnecting = status.connecting || status.reconnecting;
+  if (direct) {
+    if (now - activity.lastDirectStartedAt < 1200) return false;
+    activity.lastDirectStartedAt = now;
+    return true;
+  }
 
-  const presence = status.connected
-    ? {
-        status: 'online',
-        activities: [{
-          name: 'Minecraft: The Cottage★ SMP★',
-          type: ActivityType.Playing,
-        }],
-      }
-    : reconnecting
-      ? {
-          status: 'idle',
-          activities: [{
-            name: 'Watching #minecraft-server⛏️',
-            type: ActivityType.Watching,
-          }],
-        }
-      : {
-          status: 'dnd',
-          activities: [{
-            name: 'Offline - use /start',
-            type: ActivityType.Watching,
-          }],
-        };
+  activity.unsolicited = activity.unsolicited.filter(time => now - time < TEN_MINUTES_MS);
+  if (!config.conversation.autoChatEnabled) return false;
+  if (activity.unsolicited.length >= config.conversation.maxUnsolicitedPerTenMinutes) return false;
+  if (now - activity.lastUnsolicitedAt < config.conversation.unsolicitedCooldownMs) return false;
 
-  client.user.setPresence(presence);
+  return true;
 }
 
-mc.emitter.on('connected', ({ version }) => {
-  updatePresence();
+async function clearLegacyCommands() {
+  const rest = new REST({ version: '10' }).setToken(config.discord.token);
 
-  const status = mc.getStatus();
+  try {
+    await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
+    log('Removed any old global slash commands.');
+  } catch (error) {
+    log('Could not remove old global commands: ' + error.message);
+  }
 
-  const embed = buildStatusEmbed(
-    status,
-    'Bot Connected',
-    Colors.Green,
-  ).setDescription(
-    `Connected to ${status.server} using Minecraft ${version}.`,
-  );
-
-  void notifyChannel(embed);
-});
-
-mc.emitter.on('kicked', reason => {
-  updatePresence();
-
-  const embed = createEmbed(
-    'Bot Kicked',
-    Colors.Orange,
-  ).setDescription(
-    `Reason: ${shorten(reason)}`,
-  );
-
-  void notifyChannel(embed);
-});
-
-mc.emitter.on('disconnected', () => {
-  updatePresence();
-});
-
-mc.emitter.on('reconnecting', ({ attempt, delayMs }) => {
-  updatePresence();
-
-  const delay = formatDelay(delayMs);
-
-  log(
-    'Bot',
-    `Reconnect attempt ${attempt} is scheduled in ${delay}.`,
-  );
-
-  const embed = createEmbed(
-    'Reconnection Scheduled',
-    Colors.Orange,
-  ).setDescription(
-    `Attempt ${attempt} will begin in ${delay}.`,
-  );
-
-  void notifyChannel(embed);
-});
-
-mc.emitter.on('stopped', () => {
-  updatePresence();
-
-  const embed = createEmbed(
-    'Bot Stopped',
-    Colors.Red,
-  ).setDescription(
-    'The AFK session was stopped. Use /start to connect again.',
-  );
-
-  void notifyChannel(embed);
-});
-
-client.on(Events.InteractionCreate, async interaction => {
-  if (interaction.isButton()) {
+  if (config.discord.guildId) {
     try {
-      const handled = await handleSummaryButton(interaction);
-      if (handled) return;
+      await rest.put(
+        Routes.applicationGuildCommands(client.user.id, config.discord.guildId),
+        { body: [] },
+      );
+      log('Removed any old guild slash commands from the configured GUILD_ID.');
     } catch (error) {
-      log('Summary', 'Button handling failed: ' + error.message);
+      log('Could not remove old guild commands: ' + error.message);
     }
   }
+}
 
-  if (!interaction.isChatInputCommand()) return;
+async function processCandidate(message, direct, latestMessage) {
+  const channelId = message.channel.id;
+  if (!canStartResponse(channelId, direct)) return;
 
-  const commandName = interaction.commandName;
+  const recentHistory = getHistory(channelId)
+    .slice(-config.conversation.contextMessages);
 
-  log(
-    'Discord',
-    `/${commandName} requested by ${interaction.user.tag}.`,
-  );
+  // Do not join while a sensitive topic is still active in the latest messages.
+  if (recentHistory.slice(-5).some(entry => containsHighRiskTopic(entry.content))) return;
 
-  // Acknowledge immediately so Discord does not expire the interaction
-  // while the command is being processed.
+  const context = formatHistory(channelId);
+  let decision;
+
   try {
-    await interaction.deferReply();
+    decision = await generateDecision({
+      direct,
+      context,
+      latestMessage,
+    });
   } catch (error) {
-    log(
-      'Discord',
-      `Unable to acknowledge /${commandName}: ${error.message}`,
-    );
+    log('Gemini request failed: ' + error.message);
     return;
   }
 
+  if (!decision || decision.shouldRespond !== true) return;
+
+  const reply = validateReply(decision.message);
+  if (!reply) {
+    log('A generated reply was withheld by the local safety checks.');
+    return;
+  }
+
+  const activity = getActivity(channelId);
+  const now = Date.now();
+  activity.responses.push(now);
+
+  if (!direct) {
+    activity.lastUnsolicitedAt = now;
+    activity.unsolicited.push(now);
+  }
+
   try {
-    const status = mc.getStatus();
+    if (typeof message.channel.sendTyping === 'function') {
+      await message.channel.sendTyping();
+    }
 
-    switch (commandName) {
-      case 'start': {
-        if (
-          status.connected ||
-          status.connecting ||
-          status.reconnecting
-        ) {
-          return interaction.editReply({
-            embeds: [
-              createEmbed(
-                'Bot Already Active',
-                Colors.Yellow,
-              ).setDescription(
-                'The bot is already connected or waiting to reconnect.',
-              ),
-            ],
-          });
-        }
+    const sent = await message.channel.send({
+      content: reply,
+      allowedMentions: { parse: [] },
+    });
 
-        mc.start();
+    addToHistory(channelId, {
+      authorId: client.user.id,
+      content: reply,
+      isGree: true,
+      createdAt: Date.now(),
+    });
 
-        return interaction.editReply({
-          embeds: [
-            createEmbed(
-              'Joining Server',
-              Colors.Green,
-            ).setDescription(
-              `Connecting to ${config.server.ip}. The server may take up to two minutes to wake.`,
-            ).addFields(
-              {
-                name: 'Bot Name',
-                value: `\`${config.bot.username}\`\`,
-                inline: true,
-              },
-              {
-                name: 'Server',
-                value: `\`${config.server.ip}\`\`,
-                inline: true,
-              },
-            ),
-          ],
-        });
-      }
-
-      case 'stop': {
-        if (
-          !status.connected &&
-          !status.connecting &&
-          !status.reconnecting
-        ) {
-          return interaction.editReply({
-            embeds: [
-              createEmbed(
-                'Bot Already Offline',
-                Colors.Blurple,
-              ).setDescription(
-                'There is no active AFK session to stop.',
-              ),
-            ],
-          });
-        }
-
-        mc.stop();
-
-        return interaction.editReply({
-          embeds: [
-            createEmbed(
-              'Bot Stopped',
-              Colors.Red,
-            ).setDescription(
-              'The AFK session was stopped. Use /start to connect again.',
-            ),
-          ],
-        });
-      }
-
-      case 'status': {
-        const color = status.connected
-          ? Colors.Green
-          : (
-              status.connecting || status.reconnecting
-                ? Colors.Yellow
-                : Colors.DarkGrey
-            );
-
-        return interaction.editReply({
-          embeds: [
-            buildStatusEmbed(
-              status,
-              `Bot Status: ${getBotState(status)}`,
-              color,
-            ),
-          ],
-        });
-      }
-
-      default:
-        return interaction.editReply({
-          content: 'Unknown command.',
-        });
+    if (sent && typeof sent.id === 'string') {
+      log((direct ? 'Replied in ' : 'Joined ') + '#' + (message.channel.name || channelId) + '.');
     }
   } catch (error) {
-    log(
-      'Discord',
-      `Error handling /${commandName}: ${error.stack || error.message}`,
-    );
+    log('Unable to send a reply: ' + error.message);
+  }
+}
 
+async function handleMessage(message) {
+  if (
+    message.author.bot ||
+    message.system ||
+    !message.guild ||
+    !client.user ||
+    !message.channel ||
+    !message.channel.isTextBased() ||
+    typeof message.channel.send !== 'function' ||
+    !isAllowedChannel(message.channel.id)
+  ) return;
+
+  const text = cleanIncomingContent(message.content, client.user.id);
+  if (!text) return;
+
+  let direct = message.mentions.users.has(client.user.id) ||
+    Boolean(message.mentions.repliedUser && message.mentions.repliedUser.id === client.user.id);
+
+  // Some Discord replies omit a replied-user mention; verify the referenced message.
+  if (
+    !direct &&
+    message.reference &&
+    message.reference.messageId &&
+    message.channel.messages &&
+    typeof message.channel.messages.fetch === 'function'
+  ) {
     try {
-      await interaction.editReply({
-        content: '⚠️ The command could not be completed. Check the Console Bot logs.',
-      });
-    } catch (replyError) {
-      log(
-        'Discord',
-        `Unable to send command error response: ${replyError.message}`,
+      const referencedMessage = await message.channel.messages.fetch(message.reference.messageId);
+      direct = Boolean(
+        referencedMessage &&
+        referencedMessage.author &&
+        referencedMessage.author.id === client.user.id
       );
+    } catch {
+      // If the referenced message is unavailable, continue without treating it as direct.
     }
   }
-});
 
-client.on(Events.MessageCreate, async message => {
-  if (message.author.bot || !message.guild || !client.user) return;
+  addToHistory(message.channel.id, {
+    authorId: message.author.id,
+    content: text,
+    isGree: false,
+    createdAt: Date.now(),
+  });
 
-  const mentioned = message.mentions.users.has(client.user.id);
-  const asksForSummary = /\bsummar(?:y|ize|ise)\b/i.test(message.content);
+  // Stay silent and do not send high-risk source messages to Gemini.
+  if (containsHighRiskTopic(text)) return;
 
-  if (!mentioned || !asksForSummary) return;
+  const chanceEligible = !direct && config.conversation.autoChatEnabled &&
+    shouldConsiderSpontaneous({
+      content: text,
+      chance: config.conversation.autoChatChance,
+      random: Math.random,
+    });
 
-  try {
-    await summarizeChannel({ message, client });
-  } catch (error) {
-    log('Summary', 'Unexpected summary error: ' + (error.stack || error.message));
-  }
+  if (!direct && !chanceEligible) return;
+
+  const previous = channelQueues.get(message.channel.id) || Promise.resolve();
+  const task = previous.then(
+    () => processCandidate(message, direct, text),
+    () => processCandidate(message, direct, text),
+  ).catch(error => {
+    log('Message handler failed: ' + (error && error.message ? error.message : String(error)));
+  });
+
+  channelQueues.set(message.channel.id, task);
+  void task.then(() => {
+    if (channelQueues.get(message.channel.id) === task) {
+      channelQueues.delete(message.channel.id);
+    }
+  });
+}
+
+client.on(Events.MessageCreate, message => {
+  void handleMessage(message).catch(error => {
+    log('Message intake failed: ' + (error && error.message ? error.message : String(error)));
+  });
 });
 
 client.once(Events.ClientReady, async readyClient => {
-  log(
-    'Discord',
-    `Logged in as ${readyClient.user.tag}.`,
-  );
+  log('Logged in as ' + readyClient.user.tag + '.');
+  log('Conversation-only mode enabled; no slash or prefix commands are registered.');
+  log('Gemini model: ' + config.gemini.model + '; configured API keys: ' + getConfiguredKeyCount() + '.');
+  log(config.conversation.autoChatEnabled
+    ? 'Selective unsolicited participation is enabled.'
+    : 'Unsolicited participation is disabled; Gree replies only when directly addressed.');
 
-  await registerCommands();
+  readyClient.user.setPresence({
+    activities: [{
+      name: 'hanging out',
+      type: ActivityType.Watching,
+    }],
+    status: 'online',
+  });
 
-  // Slash command watchdog: check every 5 minutes.
-  log(
-    'Watchdog',
-    'Slash command watchdog started (every 5 minutes).',
-  );
-
-  setInterval(() => {
-    void commandWatchdog();
-  }, 5 * 60 * 1000);
-
-  updatePresence();
-
-  log('Bot', 'Starting AFK session.');
-
-  mc.start();
-});
-
-process.on('uncaughtException', error => {
-  console.error(
-    '[Fatal] Uncaught exception:',
-    error.stack || error.message,
-  );
+  await clearLegacyCommands();
 });
 
 process.on('unhandledRejection', reason => {
-  console.error(
-    '[Fatal] Unhandled rejection:',
-    reason,
-  );
+  const message = reason && reason.message ? reason.message : String(reason);
+  log('Unhandled rejection: ' + message);
 });
 
-log('Discord', 'Starting Discord bot.');
+if (!config.discord.token) {
+  console.error('[Gree] DISCORD_TOKEN is missing. Add it to the environment before starting.');
+  process.exit(1);
+}
 
-client.login(config.discord.token);
+if (getConfiguredKeyCount() === 0) {
+  console.error('[Gree] No Gemini API key is configured. Add GEMINI_API_KEY (or a numbered backup).');
+  process.exit(1);
+}
+
+log('Starting Discord client.');
+client.login(config.discord.token).catch(error => {
+  console.error('[Gree] Discord login failed: ' + error.message);
+  process.exitCode = 1;
+});
