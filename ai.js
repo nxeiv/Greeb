@@ -4,6 +4,8 @@ const config = require('./config');
 const { GoogleGenAI } = require('@google/genai');
 
 const AI_REQUEST_TIMEOUT_MS = 25000;
+const HTML_403_COOLDOWN_MS = 5 * 60 * 1000;
+let html403CooldownUntil = 0;
 
 function createGeminiClient(apiKey) {
   return new GoogleGenAI({
@@ -171,6 +173,15 @@ function isHtmlForbiddenResponse(error) {
   return mentionsForbidden && looksLikeHtml;
 }
 
+
+function markHtml403Cooldown() {
+  html403CooldownUntil = Date.now() + HTML_403_COOLDOWN_MS;
+}
+
+function getHtml403CooldownRemainingMs(now = Date.now()) {
+  return Math.max(0, html403CooldownUntil - now);
+}
+
 function summarizeGeminiFailure(error) {
   const raw = getErrorText(error) || String(error);
   const status = getErrorStatus(error);
@@ -236,7 +247,10 @@ async function checkGeminiConnection(options = {}) {
       // A generic HTML 403 is not a normal Gemini API JSON error. Since every
       // key uses the same host network route, rotating backup keys is unlikely
       // to help and can needlessly multiply failed requests.
-      if (isHtmlForbiddenResponse(error)) break;
+      if (isHtmlForbiddenResponse(error)) {
+        markHtml403Cooldown();
+        break;
+      }
     }
   }
 
@@ -247,6 +261,14 @@ async function checkGeminiConnection(options = {}) {
   };
 }
 async function generateDecision(options) {
+  const cooldownRemaining = getHtml403CooldownRemainingMs();
+  if (cooldownRemaining > 0) {
+    throw new Error(
+      'Gemini requests are paused for about ' + Math.ceil(cooldownRemaining / 1000) +
+      's after a generic HTML 403, to avoid repeating a blocked request. The bot will retry after the cooldown.',
+    );
+  }
+
   const keys = getApiKeys();
   if (!keys.length) throw new Error('No Gemini API key is configured.');
 
@@ -298,6 +320,7 @@ async function generateDecision(options) {
       lastError = new Error('Gemini key slot ' + (index + 1) + ' failed: ' + summarizeGeminiFailure(error));
 
       if (isHtmlForbiddenResponse(error)) {
+        markHtml403Cooldown();
         lastError = new Error(
           'Gemini returned an HTML HTTP 403 instead of a normal API JSON error. ' +
           'Backup keys were not retried because this commonly indicates a hosting-network or API frontend restriction. ' +
@@ -324,5 +347,6 @@ module.exports = {
   generateDecision,
   getConfiguredKeyCount,
   isHtmlForbiddenResponse,
+  getHtml403CooldownRemainingMs,
   summarizeGeminiFailure,
 };

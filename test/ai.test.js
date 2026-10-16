@@ -5,6 +5,8 @@ const assert = require('node:assert/strict');
 
 const {
   checkGeminiConnection,
+  generateDecision,
+  getHtml403CooldownRemainingMs,
   isHtmlForbiddenResponse,
   summarizeGeminiFailure,
 } = require('../ai');
@@ -61,6 +63,11 @@ test('preflight stops after the first HTML 403 instead of cycling backup keys', 
   assert.equal(generationCalls, 1);
   assert.match(result.message, /HTML error page/);
   assert.doesNotMatch(result.message, /secret-test-key/);
+  assert.ok(getHtml403CooldownRemainingMs() > 0);
+  await assert.rejects(
+    generateDecision({ direct: true, context: '', latestMessage: 'hello' }),
+    /paused for about .* after a generic HTML 403/,
+  );
 });
 
 test('preflight succeeds if the Models probe and generateContent succeed', async () => {
