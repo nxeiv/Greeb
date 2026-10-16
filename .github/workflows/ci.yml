@@ -27,7 +27,7 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
       - name: Report dependency advisories
-        run: npm audit --json > npm-audit.json || true; node -e 'const audit = require("./npm-audit.json"); console.log(JSON.stringify(audit.vulnerabilities || {}, null, 2))'
+        run: npm audit --audit-level=high
       - name: Check JavaScript syntax
         run: npm run check
       - name: Run conversation policy tests
