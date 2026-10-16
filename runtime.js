@@ -95,6 +95,15 @@ function createTaskLimiter(options = {}) {
   const queue = [];
   let active = 0;
 
+  function finish(item, error, value) {
+    // Release the slot and start waiting work before resolving the caller's
+    // promise, so limiter state is consistent as soon as callers resume.
+    active--;
+    drain();
+    if (error) item.reject(error);
+    else item.resolve(value);
+  }
+
   function drain() {
     while (active < maxConcurrent && queue.length > 0) {
       const item = queue.shift();
@@ -102,11 +111,10 @@ function createTaskLimiter(options = {}) {
 
       Promise.resolve()
         .then(item.task)
-        .then(item.resolve, item.reject)
-        .finally(() => {
-          active--;
-          drain();
-        });
+        .then(
+          value => finish(item, null, value),
+          error => finish(item, error),
+        );
     }
   }
 
