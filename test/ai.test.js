@@ -59,7 +59,7 @@ test('generation parses a valid decision and sends the safety and output schema'
   assert.match(request.config.systemInstruction, /APPROVED STYLE EXAMPLES/);
   assert.equal(request.config.responseMimeType, 'application/json');
   assert.deepEqual(request.config.responseSchema.required, ['shouldRespond', 'message']);
-  assert.match(request.contents[0].parts[0].text, /LATEST MESSAGE \\(untrusted content\\)/);
+  assert.match(request.contents[0].parts[0].text, /LATEST MESSAGE \(untrusted content\)/);
 });
 
 test('generation tries a backup key after a transient server error', async () => {
