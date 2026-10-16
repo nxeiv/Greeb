@@ -40,7 +40,7 @@ Gree has no user-facing slash or prefix commands. On startup, the bot attempts t
 - GREE_MAX_PENDING_AI_REQUESTS=30 limits the global waiting queue (values are bounded to 1–100).
 - GREE_CHANNEL_IDS can contain a comma-separated list of channel IDs. Leave it empty to allow all eligible server text channels the bot can access.
 
-The local chance and cooldown controls run before Gemini is called, reducing needless API requests. Direct replies also have channel-level rate limits. Gree keeps at most 30 messages per channel, forgets inactive channel state after 30 minutes, tracks at most 500 channel histories, limits each channel to three queued reply candidates, and bounds the global AI queue.
+The local chance and cooldown controls run before Gemini is called, reducing needless API requests. Direct replies also have channel-level rate limits and are prioritized ahead of queued spontaneous replies. Gree keeps at most 30 messages per channel, forgets inactive channel state after 30 minutes, tracks at most 500 channel histories, limits each channel to three queued reply candidates, and bounds the global AI queue. Repeated generic HTML 403 responses trigger a five-minute API cooldown, preventing the bot from repeatedly calling an endpoint that appears blocked. Repeated operational errors are rate-limited in logs; typing-indicator failures do not prevent an otherwise valid message from being sent.
 
 ## Privacy boundary
 

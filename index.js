@@ -49,6 +49,7 @@ const aiLimiter = createTaskLimiter({
   maxPending: config.conversation.maxPendingAIRequests,
 });
 const recentGeminiFailureLogs = new Map();
+const recentOperationalFailureLogs = new Map();
 let aiHealth = null;
 
 function log(message) {
@@ -77,6 +78,31 @@ function setAiHealth(healthy) {
   }
 }
 
+function logRateLimited(map, key, message, intervalMs = 60000) {
+  const now = Date.now();
+  const previous = map.get(key) || 0;
+  if (now - previous < intervalMs) return;
+
+  if (map.size >= 100) {
+    let oldestKey = null;
+    let oldestTime = Infinity;
+    for (const [entryKey, time] of map) {
+      if (time < oldestTime) {
+        oldestKey = entryKey;
+        oldestTime = time;
+      }
+    }
+    if (oldestKey !== null) map.delete(oldestKey);
+  }
+
+  map.set(key, now);
+  const safeMessage = String(message || 'Unknown error')
+    .replace(/AIza[0-9A-Za-z_-]{30,}/g, '[redacted API key]')
+    .replace(/\s+/g, ' ')
+    .slice(0, 420);
+  log(safeMessage);
+}
+
 function logGeminiFailure(error) {
   const raw = String(error && error.message ? error.message : error || 'Unknown Gemini error');
   const safeMessage = raw
@@ -84,24 +110,7 @@ function logGeminiFailure(error) {
     .replace(/\s+/g, ' ')
     .slice(0, 420);
   const signature = safeMessage.replace(/key slot \d+/gi, 'key slot [n]');
-  const now = Date.now();
-  const previous = recentGeminiFailureLogs.get(signature) || 0;
-
-  if (now - previous < 60000) return;
-  if (recentGeminiFailureLogs.size >= 100) {
-    let oldestKey = null;
-    let oldestTime = Infinity;
-    for (const [key, time] of recentGeminiFailureLogs) {
-      if (time < oldestTime) {
-        oldestKey = key;
-        oldestTime = time;
-      }
-    }
-    if (oldestKey !== null) recentGeminiFailureLogs.delete(oldestKey);
-  }
-
-  recentGeminiFailureLogs.set(signature, now);
-  log('Gemini request failed: ' + safeMessage);
+  logRateLimited(recentGeminiFailureLogs, signature, 'Gemini request failed: ' + safeMessage);
 }
 
 function cleanIncomingContent(content, botUserId) {
@@ -264,11 +273,21 @@ async function processCandidate(message, direct, latestMessage) {
     activity.unsolicited.push(now);
   }
 
-  try {
-    if (typeof message.channel.sendTyping === 'function') {
+  if (typeof message.channel.sendTyping === 'function') {
+    try {
       await message.channel.sendTyping();
+    } catch (error) {
+      // Typing is optional: a missing permission or rate limit must not prevent a reply.
+      logRateLimited(
+        recentOperationalFailureLogs,
+        'typing:' + channelId,
+        'Typing indicator failed in #' + (message.channel.name || channelId) + ': ' +
+          (error && error.message ? error.message : error),
+      );
     }
+  }
 
+  try {
     const sent = await message.channel.send({
       content: reply,
       allowedMentions: { parse: [] },
@@ -285,7 +304,12 @@ async function processCandidate(message, direct, latestMessage) {
       log((direct ? 'Replied in ' : 'Joined ') + '#' + (message.channel.name || channelId) + '.');
     }
   } catch (error) {
-    log('Unable to send a reply: ' + error.message);
+    logRateLimited(
+      recentOperationalFailureLogs,
+      'send:' + channelId,
+      'Unable to send a reply in #' + (message.channel.name || channelId) + ': ' +
+        (error && error.message ? error.message : error),
+    );
   }
 }
 
@@ -367,6 +391,8 @@ client.once(Events.ClientReady, async readyClient => {
   log('Logged in as ' + readyClient.user.tag + '.');
   log('Conversation-only mode enabled; no slash or prefix commands are registered.');
   log('Gemini model: ' + config.gemini.model + '; configured API keys: ' + getConfiguredKeyCount() + '.');
+  log('Request limits: ' + config.conversation.maxConcurrentAIRequests +
+    ' concurrent Gemini request(s), up to ' + config.conversation.maxPendingAIRequests + ' waiting globally.');
   log(config.conversation.autoChatEnabled
     ? 'Selective unsolicited participation is enabled.'
     : 'Unsolicited participation is disabled; Gree replies only when directly addressed.');
