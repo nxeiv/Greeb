@@ -70,7 +70,11 @@ function setAiHealth(healthy) {
     activities: [activity],
     status: healthy ? 'online' : 'idle',
   })).catch(error => {
-    log('Unable to update bot presence: ' + String(error && error.message ? error.message : error).slice(0, 180));
+    logRateLimited(
+      recentOperationalFailureLogs,
+      'presence',
+      'Unable to update bot presence: ' + redactSecrets(error && error.message ? error.message : error),
+    );
   });
 
   if (previous === false && healthy) {
@@ -211,7 +215,8 @@ async function clearLegacyCommands() {
     await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
     log('Removed any old global slash commands.');
   } catch (error) {
-    log('Could not remove old global commands: ' + error.message);
+    logRateLimited(recentOperationalFailureLogs, 'clear-global-commands',
+      'Could not remove old global commands: ' + redactSecrets(error && error.message ? error.message : error));
   }
 
   if (config.discord.guildId) {
@@ -222,7 +227,8 @@ async function clearLegacyCommands() {
       );
       log('Removed any old guild slash commands from the configured GUILD_ID.');
     } catch (error) {
-      log('Could not remove old guild commands: ' + error.message);
+      logRateLimited(recentOperationalFailureLogs, 'clear-guild-commands',
+        'Could not remove old guild commands: ' + redactSecrets(error && error.message ? error.message : error));
     }
   }
 }
@@ -378,14 +384,30 @@ async function handleMessage(message) {
     { priority: direct ? 'high' : 'normal' },
   ).catch(error => {
     if (error && /reprioritized for a direct mention/.test(error.message || '')) return;
-    log('Message handler failed: ' + (error && error.message ? error.message : String(error)));
+    logRateLimited(
+      recentOperationalFailureLogs,
+      'message-handler',
+      'Message handler failed: ' + redactSecrets(error && error.message ? error.message : error),
+    );
   });
 }
 
 client.on(Events.MessageCreate, message => {
   void handleMessage(message).catch(error => {
-    log('Message intake failed: ' + (error && error.message ? error.message : String(error)));
+    logRateLimited(
+      recentOperationalFailureLogs,
+      'message-intake',
+      'Message intake failed: ' + redactSecrets(error && error.message ? error.message : error),
+    );
   });
+});
+
+client.on('error', error => {
+  logRateLimited(
+    recentOperationalFailureLogs,
+    'discord-client',
+    'Discord client error: ' + redactSecrets(error && error.message ? error.message : error),
+  );
 });
 
 client.once(Events.ClientReady, async readyClient => {
